@@ -1,0 +1,19 @@
+# Module template for any module that needs Kotlin protobuf code generation
+# via the in-project `protoc-plugin` plugin.
+#
+# Apply from a consumer's module.yaml with:
+#
+#   apply:
+#     - ../kotlin.module-template.yaml
+#     - ../protobuf.module-template.yaml
+#
+# This enables the protoc-plugin and adds the `pbandk-runtime` that the
+# generated message classes reference. Generation is multiplatform-ready
+# (pure Kotlin), so consumers can stay JVM-only or flip to a Kotlin
+# Multiplatform product without touching the plugin again.
+plugins:
+  protoc-plugin:
+    enabled: true
+
+dependencies:
+  - $libs.pbandk.runtime

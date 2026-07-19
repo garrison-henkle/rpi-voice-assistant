@@ -1,0 +1,24 @@
+# Build outputs
+build/
+.gradle/
+.m2.cache/
+out/
+dist/
+
+# IDE / editor
+.idea/
+*.iml
+.vscode/
+
+# Secrets / environment overrides
+.env
+.env.local
+.env.*.local
+models/*.Modelfile.local
+
+# OS / tooling noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp

@@ -1,0 +1,24 @@
+apply:
+  - ../kotlin.module-template.yaml
+  - ../protobuf.module-template.yaml
+
+product:
+  type: jvm/app
+  platforms: [ jvm ]
+
+settings:
+  jvm:
+    mainClass: dev.henkle.rpi.assistant.AssistantKt
+
+dependencies:
+  - $libs.koog.agents
+  - $libs.koog.prompt.executor.ollama
+  - $libs.kotlinx.coroutines.core
+  - $libs.kotlinx.serialization.json
+  - $libs.ktor.client.cio
+  - $libs.ktor.client.content.negotiation
+  - $libs.ktor.serialization.kotlinx.json
+  - $libs.logback.classic
+
+test-dependencies@jvm:
+  - $kotlin.test.junit5

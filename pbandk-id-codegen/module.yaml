@@ -1,0 +1,31 @@
+apply:
+  - ../kotlin.module-template.yaml
+
+# Library providing a pbandk `protoc-gen-pbandk` `ServiceGenerator` implementation
+# that reads the `(id)` and `(source)` custom message options declared in
+# `esphome_options.proto` and emits companion-object ID extensions for the
+# generated pbandk message classes.
+#
+# This module is linked only at protoc-time through protoc-plugin's
+# `kotlin_service_gen=...jar|class` option. We depend on BOTH
+# `pbandk-codegen-lib` (the SPI interfaces: `ServiceGenerator`,
+# `pb.CodeGeneratorRequest`) and `pbandk-runtime` (the data classes our generator
+# inspects: `wkt.MessageOptions`, `UnknownField`). Neither is a transitive
+# dependency of any other module in this project; they only matter inside the
+# jar that protoc-gen-pbandk loads dynamically at code-generation time.
+#
+# `jvm.release: 17` matches the JRE that protoc-gen-pbandk-jvm:0.16.0's
+# Spring-Boot loader actually executes the plugin on (it caps at class file
+# version 61 / Java 17); defaulting to 21 produces a codegen jar that is too
+# new for protoc-gen-pbandk to load.
+product:
+  type: jvm/lib
+  platforms: [ jvm ]
+
+settings:
+  jvm:
+    release: 17
+
+dependencies:
+  - $libs.pbandk.codegen.lib
+  - $libs.pbandk.runtime

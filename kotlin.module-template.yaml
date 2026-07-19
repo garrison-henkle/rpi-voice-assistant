@@ -1,0 +1,10 @@
+settings:
+  kotlin:
+    version: 2.4.10
+    progressiveMode: true
+    optIns:
+      - kotlin.contracts.ExperimentalContracts
+      - kotlin.io.path.ExperimentalPathApi
+#      - kotlin.time.ExperimentalTime
+  jvm:
+    release: 21

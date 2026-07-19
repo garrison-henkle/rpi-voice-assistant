@@ -1,0 +1,24 @@
+# Tuned for the Nest-Mini-style voice-assistant workload.
+# Parent handles the bulk of the weights; we cap parameters + system prompt here.
+FROM qwen3:1.7b
+
+# The default is 40,960 tokens (≈9 GB KV cache at fp16 on Qwen3-1.7B's
+# 28 layers × 2048 hidden_dim). On a Pi 4/8 GB, that would OOM-Kill
+# the JVM orchestrator or the LVA process. 2,048 yields ~450 MB of KV
+# and is plentiful for system-prompt + short turns of history.
+PARAMETER num_ctx 2048
+
+# Cap reply length so TTS never spools forever; voice replies should
+# be 1-3 sentences, ~256 tokens is a generous ceiling.
+PARAMETER num_predict 256
+
+# Qwen3 supports a "thinking" mode that emits chain-of-thought before
+# the final answer. We disable it for the assistant path: Piper would
+# otherwise attempt to start speaking the internal reasoning.
+PARAMETER temperature 0.6
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+
+SYSTEM """You are a privacy-first voice assistant running on a Raspberry Pi.
+Reply in 1-3 short, conversational sentences. No markdown, no lists, no code blocks.
+If you don't know the answer, say so plainly; do not invent."""

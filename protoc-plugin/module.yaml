@@ -1,0 +1,7 @@
+product: jvm/amper-plugin
+
+apply:
+  - ../kotlin.module-template.yaml
+
+pluginInfo:
+  settingsClass: org.jetbrains.amper.plugins.protobuf.Settings

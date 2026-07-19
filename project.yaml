@@ -1,0 +1,7 @@
+modules:
+  - pbandk-id-codegen
+  - protoc-plugin
+  - rpi-assistant
+
+plugins:
+  - protoc-plugin

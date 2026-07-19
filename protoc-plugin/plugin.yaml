@@ -1,0 +1,22 @@
+tasks:
+  provision:
+    action: !org.jetbrains.amper.plugins.protobuf.provisionBinaries
+      settings: ${pluginSettings}
+      bin: ${taskOutputDir}/bin
+      include: ${taskOutputDir}/include
+
+  generate:
+    action: !org.jetbrains.amper.plugins.protobuf.generateProto
+      bin: ${provision.action.bin}
+      include: ${provision.action.include}
+      sourceDir: ${module.rootDir}/proto # TODO: support maven layout?
+      kotlinOutputDir: ${taskOutputDir}/kotlin
+      codegenJar: ${module.rootDir}/../build/tasks/_pbandk-id-codegen_jarJvm/pbandk-id-codegen-jvm.jar
+
+commands:
+  - generate
+
+generated:
+  sources:
+    - language: kotlin
+      directory: ${tasks.generate.action.kotlinOutputDir}
