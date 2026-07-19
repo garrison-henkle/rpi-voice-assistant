@@ -38,21 +38,24 @@ export DOCKER_BUILDKIT=1
 
 # Wait for Ollama to answer the tags endpoint. First-boot is slow on a Pi
 # (SSH keypair generation + CPU inference-engine init can take 60-90 s), so
-# we allow up to 3 minutes. On timeout, print container state + last log
-# lines so the next step can diagnose from one screenful.
+# we allow up to 3 minutes. We probe from the *host* rather than from inside
+# the ollama container because the official ollama image is minimal and does
+# not ship curl; probing inside produced a false-negative timeout even when
+# the daemon was healthy. With `network_mode: host`, the daemon shares the
+# host's :11434, so a host-side curl is the canonical liveness check.
 wait_for_ollama() {
   local tries=180 elapsed=0
   while (( tries-- > 0 )); do
     elapsed=$((elapsed + 1))
-    if docker exec ollama curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+    if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
       LOG "ollama up after ${elapsed}s"
       return 0
     fi
     sleep 1
   done
-  WARN "ollama did not answer on :11434 within 3 minutes"
-  WARN "Container state:"
-  docker inspect --format '  status={{.State.Status}}  exitCode={{.State.ExitCode}}  error={{.State.Error}}' ollama || true
+  WARN "host :11434 did not answer within 3 minutes"
+  WARN "is the ollama container running?"
+  docker ps --filter name=^ollama$ --format '  {{.Names}}\t{{.Status}}\t{{.Ports}}' >&2 || true
   WARN "Last 20 lines of ollama log:"
   docker logs --tail=20 ollama >&2 || true
   return 1
