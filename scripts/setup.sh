@@ -36,19 +36,25 @@ fi
 
 export DOCKER_BUILDKIT=1
 
-# Wait for an Ollama daemon to respond to the tags endpoint. Returns 0 on
-# success, 1 after timeout. Uses plain `docker exec` (no -it) so it works in
-# non-TTY contexts and fails loudly under `set -e`.
+# Wait for Ollama to answer the tags endpoint. First-boot is slow on a Pi
+# (SSH keypair generation + CPU inference-engine init can take 60-90 s), so
+# we allow up to 3 minutes. On timeout, print container state + last log
+# lines so the next step can diagnose from one screenful.
 wait_for_ollama() {
-  local tries=60
+  local tries=180 elapsed=0
   while (( tries-- > 0 )); do
+    elapsed=$((elapsed + 1))
     if docker exec ollama curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+      LOG "ollama up after ${elapsed}s"
       return 0
     fi
     sleep 1
   done
-  WARN "ollama did not answer on :11434 within 60 s"
-  WARN "Try:  docker logs ollama  (then:  systemctl status docker)"
+  WARN "ollama did not answer on :11434 within 3 minutes"
+  WARN "Container state:"
+  docker inspect --format '  status={{.State.Status}}  exitCode={{.State.ExitCode}}  error={{.State.Error}}' ollama || true
+  WARN "Last 20 lines of ollama log:"
+  docker logs --tail=20 ollama >&2 || true
   return 1
 }
 
