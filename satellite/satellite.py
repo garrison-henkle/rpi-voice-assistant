@@ -40,7 +40,7 @@ def _env(name: str, default: str) -> str:
 
 ASST_BASE_URL       = _env("RPI_ASST_BASE_URL",   "http://rpi-assistant:6059")
 WHISPER_BASE_URL    = _env("WHISPER_BASE_URL",    "http://faster-whisper:9000")
-WAKE_TH_WORD        = _env("SAT_WAKE_TH_WORD",    "hey_jarvis")
+WAKE_TH_WORD        = _env("SAT_WAKE_TH_WORD",    "hey_rhasspy")
 WAKE_THRESHOLD      = float(_env("SAT_WAKE_THRESHOLD", "0.5"))
 SAMPLE_RATE         = int(_env("SAT_SAMPLE_RATE",  "16000"))
 CHANNELS            = 1
@@ -177,14 +177,20 @@ def main() -> int:
             _env("XDG_RUNTIME_DIR", "/run/user/1000"),
         )
 
-    # openWakeWord: load the requested model. The default 'hey_jarvis' is
-    # bundled as a tflite/onnx file in the package; no network needed.
+    # openWakeWord: load the requested model. The `.onnx` should already be
+    # in the image thanks to the prewarm step at build time; if a different
+    # wake-word was requested at runtime, fall back to a download attempt.
     try:
         wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="onnx")
         log.info("wake model loaded: %s", WAKE_TH_WORD)
     except Exception as e:
-        log.error("could not load wake model '%s': %s", WAKE_TH_WORD, e)
-        return 2
+        log.warning("could not load in-image wake model '%s'; retrying online: %s", WAKE_TH_WORD, e)
+        try:
+            wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="onnx", download_updates=True)
+            log.info("wake model loaded (with download): %s", WAKE_TH_WORD)
+        except Exception as e2:
+            log.error("could not load wake model '%s': %s", WAKE_TH_WORD, e2)
+            return 2
 
     try:
         with sd.RawInputStream(

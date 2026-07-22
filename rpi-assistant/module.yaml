@@ -14,8 +14,20 @@ settings:
     mainClass: dev.henkle.rpi.assistant.AssistantKt
 
 dependencies:
-  - $libs.koog.agents
-  - $libs.koog.prompt.executor.ollama
+  # Koog's transitive tree drags in tinylog + slf4j-simple, which fight each
+  # other (and Logback) for the SLF4J slot. Exclude them so Logback is the
+  # sole provider on the classpath.
+  - $libs.koog.agents:
+      exclude:
+        - "org.tinylog:tinylog-api"
+        - "org.tinylog:tinylog-impl"
+        - "org.slf4j:slf4j-simple"
+  - $libs.koog.prompt.executor.ollama:
+      exclude:
+        - "org.tinylog:tinylog-api"
+        - "org.tinylog:tinylog-impl"
+        - "org.slf4j:slf4j-simple"
+  - $libs.onnxruntime
   - $libs.kotlinx.coroutines.core
   - $libs.kotlinx.serialization.json
 

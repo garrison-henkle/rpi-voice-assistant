@@ -22,3 +22,12 @@ Thumbs.db
 *.log
 *.tmp
 *.swp
+
+# Python bytecode + caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

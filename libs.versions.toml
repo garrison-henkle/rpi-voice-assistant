@@ -16,6 +16,8 @@ pbandk-codegen-lib   = { module = "pro.streem.pbandk:protoc-gen-pbandk-lib",    
 
 koog-agents                          = { module = "ai.koog:koog-agents-jvm",          version.ref = "koog" }
 koog-prompt-executor-ollama           = { module = "ai.koog:prompt-executor-ollama-client", version.ref = "koog" }
+# Standalone ONNX runtime so koog's onnx interop is deterministic
+onnxruntime                          = { module = "com.microsoft.onnxruntime:onnxruntime", version = "1.19.2" }
 
 kotlinx-coroutines-core   = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core",    version.ref = "coroutines" }
 kotlinx-serialization-json= { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }

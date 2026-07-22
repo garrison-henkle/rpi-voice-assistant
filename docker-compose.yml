@@ -114,7 +114,7 @@ services:
     environment:
       RPI_ASST_BASE_URL:  "http://rpi-assistant:6059"
       WHISPER_BASE_URL:   "http://faster-whisper:9000"
-      SAT_WAKE_TH_WORD:   "hey_jarvis"
+      SAT_WAKE_TH_WORD:   "hey_rhasspy"
       SAT_WAKE_THRESHOLD: "0.5"
       SAT_SAMPLE_RATE:    "16000"
       SAT_VAD_RMS_QUIET:  "200"
