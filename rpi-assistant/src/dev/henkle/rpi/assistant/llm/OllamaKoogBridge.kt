@@ -28,7 +28,7 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
     suspend fun chat(userText: String, onDelta: suspend (String) -> Unit): String {
         val prompt = prompt("voice-assistant-${System.nanoTime()}") {
             system(
-                "You are a privacy-first voice assistant running on a Raspberry Pi. " +
+                "You are a voice assistant named Rhasspy. " +
                     "Reply in 1-3 short, conversational sentences. " +
                     "No markdown, no lists, no code blocks. If you do not know the answer, " +
                     "say so plainly; do not invent."

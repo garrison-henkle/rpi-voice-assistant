@@ -1,7 +1,8 @@
 FROM python:3.11-slim-bookworm
 
-# sounddevice uses PortAudio → libportaudio2 on Debian. openwakeword needs
-# libsndfile1 for its wav_io, and ffmpeg for any compressed audio we may need.
+# sounddevice uses PortAudio → libportaudio2 on Debian.
+# moonshine-voice needs libsndfile1 for its wav_io; ffmpeg for any
+# compressed audio we may need.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
         libsndfile1 \
@@ -20,6 +21,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY prewarm-wake.py /app/prewarm-wake.py
 RUN SAT_WAKE_TH_WORD=hey_rhasspy python3 /app/prewarm-wake.py && \
     rm /app/prewarm-wake.py
+
+# Same idea for moonshine/base — download at build time using the package's
+# own helper so we ship an ONNX model verbatim. ~120 MB total.
+COPY prewarm-moonshine.py /app/prewarm-moonshine.py
+RUN python3 /app/prewarm-moonshine.py && \
+    rm /app/prewarm-moonshine.py
 
 COPY satellite.py .
 

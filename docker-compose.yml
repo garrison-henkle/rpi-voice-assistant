@@ -39,33 +39,6 @@ services:
       retries: 10
       start_period: 120s
 
-  faster-whisper:
-    # Active fork of the SYSTRAN 'faster-whisper-server' Docker Hub image
-    # (which was suspended). OpenAI-compatible `POST /v1/audio/transcriptions`
-    # is what the satellite posts to, so no client changes needed.
-    image: hwdsl2/whisper-server
-    container_name: faster-whisper
-    networks:
-      - stack
-    environment:
-      WHISPER_MODEL: "base.en"
-      WHISPER_LANGUAGE: "en"
-      WHISPER_PORT: "9000"
-      WHISPER_DEVICE: "cpu"
-      WHISPER_COMPUTE_TYPE: "int8"
-      WHISPER_THREADS: "2"
-      WHISPER_LOG_LEVEL: "INFO"
-      # Disable bearer-token auth so the satellite + healthcheck don't have to
-      # carry the auto-generated key. Safe in our private docker network.
-      WHISPER_API_KEY: ""
-    volumes:
-      - whisper-data:/var/lib/whisper
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/v1/models')\""]
-      interval: 15s
-      retries: 15
-      start_period: 120s
-
   rpi-assistant:
     build:
       context: .
@@ -75,8 +48,6 @@ services:
       ollama:
         condition: service_healthy
       piper:
-        condition: service_healthy
-      faster-whisper:
         condition: service_healthy
     networks:
       - stack
@@ -100,8 +71,6 @@ services:
     depends_on:
       rpi-assistant:
         condition: service_started
-      faster-whisper:
-        condition: service_healthy
     networks:
       - stack
     # Bind PulseAudio over the user's socket so we can read/write the host mic
@@ -117,7 +86,6 @@ services:
       - /dev/snd
     environment:
       RPI_ASST_BASE_URL:  "http://rpi-assistant:6059"
-      WHISPER_BASE_URL:   "http://faster-whisper:9000"
       SAT_WAKE_TH_WORD:   "hey_rhasspy"
       SAT_WAKE_THRESHOLD: "0.5"
       SAT_SAMPLE_RATE:    "16000"
@@ -133,4 +101,3 @@ networks:
 
 volumes:
   ollama-models:
-  whisper-data:
