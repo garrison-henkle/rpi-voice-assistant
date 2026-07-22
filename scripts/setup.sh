@@ -72,11 +72,16 @@ LOG "0/5  Building Kotlin jar on the host (skip Docker's protoc sandbox)"
 # caches differ per host; cover Linux Pi + macOS dev.
 mkdir -p "$ROOT/app-deps"
 DEPS_SRC=""
-for cand in /root/.m2 "$HOME/.m2" "$HOME/.m2.cache" "$HOME/Library/Caches/JetBrains/Kotlin/.m2.cache"; do
+for cand in \
+    "/root/.m2" \
+    "$HOME/.m2" \
+    "$HOME/.m2.cache" \
+    "$HOME/.cache/JetBrains/Kotlin/.m2.cache" \
+    "$HOME/Library/Caches/JetBrains/Kotlin/.m2.cache"; do
   [[ -d "$cand" ]] && DEPS_SRC="$cand" && break
 done
 if [[ -z "$DEPS_SRC" ]]; then
-  DIE "could not locate Maven/Gradle cache; expected one of /root/.m2, ~/.m2, ~/.m2.cache, ~/Library/Caches/JetBrains/Kotlin/.m2.cache"
+  DIE "could not locate Maven/Gradle cache; expected one of /root/.m2, ~/.m2, ~/.m2.cache, ~/.cache/JetBrains/Kotlin/.m2.cache (Linux Pi), ~/Library/Caches/JetBrains/Kotlin/.m2.cache (Mac)"
 fi
 LOG "    collecting *.jar deps from $DEPS_SRC (skipping sources/javadoc)"
 find "$DEPS_SRC" -name '*.jar' -not -name '*sources.jar' -not -name '*javadoc.jar' \
