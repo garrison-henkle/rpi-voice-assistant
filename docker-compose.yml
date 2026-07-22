@@ -3,7 +3,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
-    network_mode: host
+    networks:
+      - stack
     volumes:
       - ollama-models:/root/.ollama
       - ./models:/models:ro
@@ -19,7 +20,8 @@ services:
       context: https://github.com/OHF-Voice/piper1-gpl.git#refs/tags/v1.5.0
       dockerfile: Dockerfile
     container_name: piper
-    network_mode: host
+    networks:
+      - stack
     # Exit the upstream ENTRYPOINT ["piper"] and run a pipeline instead.
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -84,7 +86,7 @@ services:
       RPI_ASSISTANT_HTTP_PORT: "6059"
       RPI_LLM_BASE_URL: "http://ollama:11434"
       RPI_LLM_MODEL: "qwen3-nest-mini"
-      RPI_TTS_BASE_URL: "http://localhost:5000"
+      RPI_TTS_BASE_URL: "http://piper:5000"
       RPI_TTS_VOICE: "en_US-lessac-medium"
     restart: unless-stopped
 
