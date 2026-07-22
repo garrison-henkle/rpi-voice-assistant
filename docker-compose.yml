@@ -19,9 +19,12 @@ services:
       dockerfile: Dockerfile
     container_name: piper
     network_mode: host
+    # piper1-gpl's Dockerfile sets ENTRYPOINT ["piper"], so a `command:` of
+    # `sh -c "..."` becomes `piper sh ...`, which the piper CLI parses as
+    # an unknown subcommand. Override the entrypoint to /bin/sh and put the
+    # full pipeline in `command:`.
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - sh
-      - -c
       - |
         piper.download_voices ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data && \
         exec python3 -m piper.http_server --host 0.0.0.0 --port 5000 \
