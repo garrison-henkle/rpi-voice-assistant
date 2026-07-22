@@ -1,12 +1,13 @@
 #!/bin/sh
-# `/bin/sh -c` entrypoint for the piper container. Replaces piper1-gpl's
+# `/bin/sh` entrypoint for the piper container. Replaces piper1-gpl's
 # upstream ENTRYPOINT so we (a) fetch the requested voice ourselves and
 # (b) start the http_server with it.
 #
 # `piper.download_voices` ships an internal name -> URL map that lags
 # behind the rhasspy/piper-voices Hugging Face repo. So for voices that
 # were contributed after that bundle's last update (e.g.
-# en_US-hfc_male-medium) we go straight to Hugging Face via curl.
+# en_US-hfc_male-medium) we go straight to Hugging Face via Python's
+# stdlib urllib — we don't have `curl` or `wget` in piper1-gpl's image.
 
 set -e
 
@@ -16,11 +17,36 @@ DATA_DIR="/data"
 
 mkdir -p "$DATA_DIR"
 
-cleanup_partial() {
-    # if a `curl`-time download was interrupted, the half-written file
-    # might be a valid-but-tiny file that confuses piper. Nuke anything
-    # under 256 bytes so the next restart re-downloads cleanly.
-    find "$DATA_DIR" -maxdepth 1 -name "${VOICE}.*" -size -256c -delete
+# Stream `url` down to `dest`. Atomically rename from a `.part` file only
+# when the result is at least 1 KiB, so a half-broken download can't
+# leave a zero-byte file at the path Piper expects.
+download_via_python() {
+    url="$1"
+    dest="$2"
+    tmp="${dest}.part"
+    if [ -f "$tmp" ]; then rm -f "$tmp"; fi
+    python3 - "$url" "$tmp" <<'PY'
+import os, sys, traceback, urllib.request
+
+url, tmp = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(url, timeout=180) as r:
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    if os.path.getsize(tmp) < 1024:
+        raise RuntimeError(f"payload {os.path.getsize(tmp)} B is too small; likely 404")
+    os.replace(tmp, sys.argv[2].rsplit("/", 1)[0] + "/" + os.path.basename(sys.argv[2]))
+    print(f"  downloaded {sys.argv[2]} ({os.path.getsize(sys.argv[2]):,} B)")
+except Exception as e:
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    print(f"  download failed: {url} -> {e}", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 echo "piper: requested voice = ${VOICE}"
@@ -28,20 +54,15 @@ echo "piper: requested voice = ${VOICE}"
 case "$VOICE" in
     en_US-hfc_male-medium)
         BASE="${HF_BASE}/en/en_US/hfc_male/medium"
-        cleanup_partial
-        curl -fSL --retry 3 -o "${DATA_DIR}/${VOICE}.onnx"      "${BASE}/${VOICE}.onnx"
-        curl -fSL --retry 3 -o "${DATA_DIR}/${VOICE}.onnx.json"  "${BASE}/${VOICE}.onnx.json"
+        download_via_python "${BASE}/${VOICE}.onnx"     "${DATA_DIR}/${VOICE}.onnx"
+        download_via_python "${BASE}/${VOICE}.onnx.json" "${DATA_DIR}/${VOICE}.onnx.json"
         ;;
     *)
         # try the bundled voice-url map first (no network needed for popular voices)
         if ! python3 -m piper.download_voices "$VOICE" --data-dir "$DATA_DIR"; then
             BASE="${HF_BASE}/en/en_US/${VOICE#en_US-}"
-            cleanup_partial
-            curl -fSL --retry 3 -o "${DATA_DIR}/${VOICE}.onnx" \
-                "${BASE}/${VOICE}.onnx" \
-                || { echo "no model at ${BASE}/${VOICE}.onnx" >&2; exit 1; }
-            curl -fSL --retry 3 -o "${DATA_DIR}/${VOICE}.onnx.json" \
-                "${BASE}/${VOICE}.onnx.json"
+            download_via_python "${BASE}/${VOICE}.onnx" "${DATA_DIR}/${VOICE}.onnx"
+            download_via_python "${BASE}/${VOICE}.onnx.json" "${DATA_DIR}/${VOICE}.onnx.json"
         fi
         ;;
 esac
