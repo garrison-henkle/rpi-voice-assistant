@@ -22,15 +22,17 @@ services:
     container_name: piper
     networks:
       - stack
-    # Exit the upstream ENTRYPOINT ["piper"] and run a pipeline instead.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        python3 -m piper.download_voices ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data && \
-        exec python3 -m piper.http_server --host 0.0.0.0 --port 5000 \
-          -m ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data
+    # We override the upstream ENTRYPOINT and run a small shell wrapper
+    # that fetches `PIPER_VOICE` (via download_voices OR direct HF fetch
+    # for voices not in piper1-gpl's bundled URL map), then execs the
+    # http_server wrapped with that voice. The wrapper lives in
+    # `scripts/piper-start.sh` so we don't have to escape `${VAR}` past
+    # both Compose and `/bin/sh`.
+    volumes:
+      - ./scripts/piper-start.sh:/usr/local/bin/piper-start.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/piper-start.sh"]
     environment:
-      PIPER_VOICE: en_US-lessac-medium
+      PIPER_VOICE: en_US-hfc_male-medium
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/info')\""]
       interval: 15s
@@ -87,7 +89,7 @@ services:
       RPI_LLM_BASE_URL: "http://ollama:11434"
       RPI_LLM_MODEL: "qwen3-nest-mini"
       RPI_TTS_BASE_URL: "http://piper:5000"
-      RPI_TTS_VOICE: "en_US-lessac-medium"
+      RPI_TTS_VOICE: "en_US-hfc_male-medium"
     restart: unless-stopped
 
   assistant-satellite:
