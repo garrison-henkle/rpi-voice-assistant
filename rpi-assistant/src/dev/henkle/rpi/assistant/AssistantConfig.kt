@@ -9,7 +9,7 @@ data class AssistantConfig(
 ) {
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): AssistantConfig = AssistantConfig(
-            orchestratorPort = env["RPI_ORCHESTRATOR_PORT"]?.toInt() ?: 6053,
+            orchestratorPort = env["RPI_ORCHESTRATOR_PORT"]?.toInt() ?: 6059,
             ollamaBaseUrl    = env["RPI_LLM_BASE_URL"]       ?: "http://ollama:11434",
             ollamaModel      = env["RPI_LLM_MODEL"]          ?: "qwen3-nest-mini",
             piperBaseUrl     = env["RPI_TTS_BASE_URL"]       ?: "http://piper:5000",

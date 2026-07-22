@@ -11,13 +11,13 @@ COPY build/tasks/_rpi-assistant_jarJvm/rpi-assistant-jvm.jar            /app/rpi
 COPY build/tasks/_pbandk-id-codegen_jarJvm/pbandk-id-codegen-jvm.jar    /app/lib/
 COPY app-deps/                                                           /app/lib/
 
-ENV RPI_ORCHESTRATOR_PORT=6053 \
+ENV RPI_ORCHESTRATOR_PORT=6059 \
     RPI_LLM_BASE_URL=http://ollama:11434 \
     RPI_LLM_MODEL=qwen3-nest-mini \
     RPI_TTS_BASE_URL=http://piper:5000 \
     RPI_TTS_VOICE=en_US-lessac-medium
 
-EXPOSE 6053
+EXPOSE 6059
 ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:MaxRAMPercentage=70.0", \
     "-cp", "/app/rpi-assistant.jar:/app/lib/*", \
     "dev.henkle.rpi.assistant.AssistantKt"]

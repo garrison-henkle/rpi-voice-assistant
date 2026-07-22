@@ -52,10 +52,13 @@ services:
         condition: service_healthy
       piper:
         condition: service_healthy
+    # Use 6059:6059 because the linux-voice-assistant container already owns
+    # port 6053 on the host (network_mode: host). Anything on the host that
+    # needs to talk to the orchestrator should connect to localhost:6059.
     ports:
-      - "6053:6053/tcp"
+      - "6059:6059/tcp"
     environment:
-      RPI_ORCHESTRATOR_PORT: 6053
+      RPI_ORCHESTRATOR_PORT: 6059
       RPI_LLM_BASE_URL: http://localhost:11434
       RPI_LLM_MODEL: "qwen3-nest-mini"
       RPI_TTS_BASE_URL: http://localhost:5000
