@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Day-one setup for the rpi-nest-mini stack.
-# Starts ollama + piper, pulls qwen3:1.7b, builds the tuned
-# 'qwen3-nest-mini' tag from the Modelfile, then starts rpi-assistant
-# and linux-voice-assistant.
+# Builds the Kotlin jar on the host (sidestepping Docker's protoc sandbox),
+# populates ./app-deps/ with resolved jars, then brings up ollama + piper +
+# rpi-assistant + linux-voice-assistant.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,8 +34,6 @@ if [[ -n "$free_mb" && "$free_mb" -lt 4096 ]]; then
   WARN "Free up space or move /var/lib/docker to a bigger volume first"
 fi
 
-export DOCKER_BUILDKIT=1
-
 # Wait for Ollama to answer the tags endpoint. First-boot is slow on a Pi
 # (SSH keypair generation + CPU inference-engine init can take 60-90 s), so
 # we allow up to 3 minutes. We probe from the *host* rather than from inside
@@ -60,6 +58,29 @@ wait_for_ollama() {
   docker logs --tail=20 ollama >&2 || true
   return 1
 }
+
+export DOCKER_BUILDKIT=1
+
+LOG "0/5  Building Kotlin jar on the host (skip Docker's protoc sandbox)"
+# Reason: protoc downloads from Maven Central fail inside Docker's BuildKit
+# network namespace on some hosts (incl. the Pi). Building here on the host
+# means `docker compose build` only needs to copy artifacts.
+"$ROOT/kotlin" task :pbandk-id-codegen:jarJvm
+"$ROOT/kotlin" task :rpi-assistant:jarJvm
+
+# Collect resolved dep jars so the Dockerfile COPY can pick them up. Amper
+# caches differ per host; cover Linux Pi + macOS dev.
+mkdir -p "$ROOT/app-deps"
+DEPS_SRC=""
+for cand in /root/.m2 "$HOME/.m2" "$HOME/.m2.cache" "$HOME/Library/Caches/JetBrains/Kotlin/.m2.cache"; do
+  [[ -d "$cand" ]] && DEPS_SRC="$cand" && break
+done
+if [[ -z "$DEPS_SRC" ]]; then
+  DIE "could not locate Maven/Gradle cache; expected one of /root/.m2, ~/.m2, ~/.m2.cache, ~/Library/Caches/JetBrains/Kotlin/.m2.cache"
+fi
+LOG "    collecting *.jar deps from $DEPS_SRC (skipping sources/javadoc)"
+find "$DEPS_SRC" -name '*.jar' -not -name '*sources.jar' -not -name '*javadoc.jar' \
+    -exec cp {} "$ROOT/app-deps/" \; 2>/dev/null || true
 
 LOG "1/5  Starting ollama + piper first (so they warm before rpi-assistant)"
 docker compose up -d ollama piper

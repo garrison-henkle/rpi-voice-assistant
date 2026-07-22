@@ -1,7 +1,23 @@
-build/
+# Don't ship IDE / logs / secrets inside Docker build context.
 .git/
 .idea/
-.gradle/
-.m2.cache/
-*.log
+*.iml
+.vscode/
 .DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+
+# Secrets / environment overrides
+.env
+.env.local
+.env.*.local
+models/*.Modelfile.local
+
+# Trim the build/ tree down to just the project jars the Dockerfile needs.
+build/artifacts/
+build/gener*ated/
+build/incremental.state/
+build/logs/
+build/temp/
