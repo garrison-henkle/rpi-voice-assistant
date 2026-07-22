@@ -26,7 +26,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        piper.download_voices ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data && \
+        python3 -m piper.download_voices ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data && \
         exec python3 -m piper.http_server --host 0.0.0.0 --port 5000 \
            -m ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data
     environment:
