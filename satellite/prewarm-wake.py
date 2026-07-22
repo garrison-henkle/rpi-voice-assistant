@@ -57,6 +57,10 @@ def _download(url: str, dest: str, min_bytes: int = 1024) -> bool:
     Returns True iff the file at `dest` is now valid."""
     tmp = dest + ".part"
     try:
+        # Resources/models is not bundled in the openwakeword wheel — it gets
+        # created lazily on first Model() construction. We have to mkdir
+        # before we can write into it.
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         # nukes any stale partial file from a prior failed attempt
         if os.path.exists(tmp):
             os.remove(tmp)
