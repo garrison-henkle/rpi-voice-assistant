@@ -51,6 +51,9 @@ services:
       WHISPER_COMPUTE_TYPE: "int8"
       WHISPER_THREADS: "2"
       WHISPER_LOG_LEVEL: "INFO"
+      # Disable bearer-token auth so the satellite + healthcheck don't have to
+      # carry the auto-generated key. Safe in our private docker network.
+      WHISPER_API_KEY: ""
     volumes:
       - whisper-data:/var/lib/whisper
     healthcheck:
