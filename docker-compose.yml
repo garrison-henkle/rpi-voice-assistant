@@ -7,8 +7,12 @@ services:
     volumes:
       - ollama-models:/root/.ollama
       - ./models:/models:ro
+    # The official ollama image is minimal and does not ship curl, so a
+    # `curl http://127.0.0.1:11434/api/tags` healthcheck fails with
+    # `executable not found` even when the daemon is healthy. CLI is always
+    # available, so probe the daemon via `/bin/ollama list` instead.
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://127.0.0.1:11434/api/tags"]
+      test: ["CMD", "/bin/ollama", "list"]
       interval: 10s
       retries: 15
       start_period: 90s
