@@ -1,4 +1,8 @@
 sounddevice==0.5.1
-numpy==2.1.0
+# tflite-runtime 2.14 (transitive via openwakeword) was compiled against
+# numpy 1.x; numpy 2.x breaks `tflite_runtime.interpreter` with
+# `AttributeError: _ARRAY_API not found`. Pin to 1.x.
+# sounddevice 0.5.1 also still works fine with numpy 1.x.
+numpy>=1.24,<2
 openwakeword==0.6.0
 requests==2.32.3

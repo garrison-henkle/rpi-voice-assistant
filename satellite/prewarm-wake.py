@@ -1,147 +1,60 @@
-"""Pre-download the openwakeword wake-word model into the image.
+"""Pre-download openwakeword models into the image.
 
-The openwakeword package stores per-wake-word models under
-`resources/models/`. They are NOT bundled with `pip install openwakeword`; they
-are fetched lazily the first time `Model(...)` is constructed.
+The pip-published openwakeword wheel does NOT ship:
+  - The shared feature models (melspectrogram.{tflite,onnx}, embedding_model.{tflite,onnx})
+  - The Silero VAD ONNX model
+  - Per-wake-word classifiers (hey_rhasspy_v0.1.* etc.)
+These are all fetched lazily the first time `Model(...)` constructs. We'd rather
+bake them into the image so a Pi without internet access still boots.
 
-openwakeword 0.6 publishes model files on GitHub releases. v0.5.1 ships BOTH
-`.tflite` files AND `.onnx` for the shared feature models
-(`melspectrogram`, `embedding_model`, `silero_vad`), but only `.tflite`
-variants for the per-wake-word classifiers (`hey_<word>_v0.1.tflite`).
-Asking openwakeword to instantiate a wake model with
-`inference_framework="onnx"` therefore 404s on the `.onnx` URL.
-
-We bake the `.tflite` file (the one that actually exists in v0.5.1) and
-leave runtime configured with `inference_framework="tflite"`.
+openwakeword 0.6 ships an internal helper, `openwakeword.utils.download_models`,
+which knows the official URLs by reading `MODELS`, `FEATURE_MODELS`, `VAD_MODELS`
+in `openwakeword/__init__.py`. We just call that — much safer than guessing
+file paths and release tags ourselves.
 """
 
 import os
 import sys
-import urllib.request
-
-
-# Canonical upstream URL — verified against dscripka/openWakeWord @ v0.5.1
-# release assets. Lower case tags are what's actually published.
-_GITHUB_RELEASE_TEMPLATE = (
-    "https://github.com/dscripka/openWakeWord/releases/download/{tag}/{filename}"
-)
-_KNOWN_TAG = "v0.5.1"
-
-
-def _resolve_pkg_dir() -> str:
-    """Find openwakeword's package dir without importing the package
-    (we want to avoid transitively pulling tflite/onnx runtimes just to ask
-    for a path)."""
-    # Python's site-packages location for stdlib-image installs is well-known
-    # and stable across Debian-slim / python:* images we use.
-    probe = (
-        os.environ.get("OPENWAKEWORD_PKG_DIR")
-        or "/usr/local/lib/python3.11/site-packages/openwakeword"
-        or "/usr/local/lib/python3.12/site-packages/openwakeword"
-    )
-    return probe
-
-
-def _wake_filename(wake_word: str, framework: str) -> str:
-    return f"{wake_word}_v0.1.{framework}"
-
-
-def _expected_target(pkg_dir: str, wake_word: str, framework: str) -> str:
-    return os.path.join(pkg_dir, "resources", "models", _wake_filename(wake_word, framework))
-
-
-def _download(url: str, dest: str, min_bytes: int = 1024) -> bool:
-    """Stream `url` down to `dest`. Atomically rename from a `.part` file
-    only when the resulting payload is at least `min_bytes` long, so a
-    half-broken download can never leave a zero-byte file behind.
-    Returns True iff the file at `dest` is now valid."""
-    tmp = dest + ".part"
-    try:
-        # Resources/models is not bundled in the openwakeword wheel — it gets
-        # created lazily on first Model() construction. We have to mkdir
-        # before we can write into it.
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        # nukes any stale partial file from a prior failed attempt
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        with urllib.request.urlopen(url, timeout=120) as r:
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = r.read(64 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        size = os.path.getsize(tmp)
-        if size < min_bytes:
-            raise RuntimeError(
-                f"downloaded payload is only {size} bytes (expected >= {min_bytes}); "
-                "likely a 200-on-an-empty-body / CDN bug or 404)"
-            )
-        os.replace(tmp, dest)
-        print(f"  downloaded {dest}  ({size:,} bytes)", flush=True)
-        return True
-    except Exception as e:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-        print(f"  download failed: {url} → {e}", flush=True)
-        return False
 
 
 def main() -> int:
-    wake_word = os.environ.get("SAT_WAKE_TH_WORD", "hey_rhasspy")
-    pkg_dir = _resolve_pkg_dir()
+    # We don't actually need anything user-configurable; the wake-word we ask
+    # for below is informational. The shared feature + VAD models are pulled
+    # unconditionally because `Model(...)` always needs them.
+    requested_wake_word = os.environ.get("SAT_WAKE_TH_WORD", "hey_rhasspy")
 
-    print(f"pre-warming openwakeword model: {wake_word}", flush=True)
-    print(f"  package: {pkg_dir}", flush=True)
+    print(f"pre-warming openwakeword models (wake word: {requested_wake_word})", flush=True)
 
-    if not os.path.isdir(pkg_dir):
-        print(
-            f"WARNING: openwakeword package dir not found at {pkg_dir}; skipping bake "
-            "(runtime will need a network attempt to fetch against its own MODELS map).",
-            flush=True,
-        )
-        return 0  # do not fail the build — the satellite's runtime can still try to download.
+    # Importing openwakeword has a side-effect of populating MODELS / FEATURE_MODELS
+    # / VAD_MODELS dictionaries.
+    import openwakeword
+    from openwakeword.utils import download_models
 
-    # 1. The .tflite file (the one publish in v0.5.1).
-    tflite_target = _expected_target(pkg_dir, wake_word, "tflite")
-    if os.path.exists(tflite_target) and os.path.getsize(tflite_target) >= 1024:
-        print(f"  already present (>= 1KiB): {tflite_target}", flush=True)
-    else:
-        if os.path.exists(tflite_target):
-            print(
-                f"  existed but suspiciously small ({os.path.getsize(tflite_target)} B); "
-                "re-downloading",
-                flush=True,
-            )
-            os.remove(tflite_target)
-        tflite_url = _GITHUB_RELEASE_TEMPLATE.format(
-            tag=_KNOWN_TAG,
-            filename=_wake_filename(wake_word, "tflite"),
-        )
-        if not _download(tflite_url, tflite_target):
-            print("FAILED to pre-warm wake model (.tflite)", flush=True)
-            return 1
+    target_dir = os.path.join(
+        os.path.dirname(os.path.abspath(openwakeword.__file__)),
+        "resources", "models",
+    )
+    os.makedirs(target_dir, exist_ok=True)
 
-    # 2. Best-effort attempt for the .onnx counterpart. If it 404s we don't
-    #    care — runtime uses tflite. We just record success/failure for the log.
-    onnx_target = _expected_target(pkg_dir, wake_word, "onnx")
-    if not os.path.exists(onnx_target) or os.path.getsize(onnx_target) < 1024:
-        if os.path.exists(onnx_target):
-            os.remove(onnx_target)
-        onnx_url = _GITHUB_RELEASE_TEMPLATE.format(
-            tag=_KNOWN_TAG,
-            filename=_wake_filename(wake_word, "onnx"),
-        )
-        _download(onnx_url, onnx_target)  # log only
+    # `download_models` is idempotent: it skips any file already present. Pass
+    # the wake word we care about so the per-wake-word classifier is also
+    # fetched; the rest of MODELS gets downloaded unfortunately too, but the
+    # extra ~2 MiB is a small price for "the image boots offline".
+    download_models(
+        model_names=[requested_wake_word],
+        target_directory=target_dir,
+    )
 
-    print("wake-word model ready", flush=True)
+    # Surface what we ended up with so the Docker build log shows progress.
+    print(f"  target dir: {target_dir}", flush=True)
+    for entry in sorted(os.listdir(target_dir)):
+        path = os.path.join(target_dir, entry)
+        if os.path.isfile(path):
+            print(f"    {entry}  ({os.path.getsize(path):,} bytes)", flush=True)
+
+    print("wake-word models ready", flush=True)
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
