@@ -129,6 +129,10 @@ class ChunkPlayer:
     sounddevice's RawOutputStream pops block-sized slices out through a
     callback running on the audio thread; if the queue is empty the
     callback fills the buffer with zeros (silent).
+
+    The stream is opened lazily on the first ``feed()`` so a host that has
+    no speakers plugged in at boot (typical for headless Pi configs) does
+    not crash the satellite before the user attaches one.
     """
 
     def __init__(
@@ -141,22 +145,39 @@ class ChunkPlayer:
         self._q = q
         sr_run = sr
         block = int(sr_run * block_ms / 1000)
+        self._sr = sr_run
         self._block_frames = block
         self._zero = np.zeros(block, dtype=np.int16)
         self._current: Optional[np.ndarray] = None
         self._offset = 0
         self._closed = False
-        self._stream = sd.RawOutputStream(
-            samplerate=sr_run,
-            blocksize=block,
-            channels=CHANNELS,
-            dtype="int16",
-            device=SPK_DEVICE,
-            callback=lambda out, _f, _t, _s: self._on_audio(out),
-        )
+        self._stream: Optional[sd.RawOutputStream] = None
+        self._open_attempts = 0
+
+    def _ensure_open(self) -> bool:
+        if self._stream is not None and not self._closed:
+            return True
+        try:
+            self._stream = sd.RawOutputStream(
+                samplerate=self._sr,
+                blocksize=self._block_frames,
+                channels=CHANNELS,
+                dtype="int16",
+                device=SPK_DEVICE,
+                callback=lambda out, _f, _t, _s: self._on_audio(out),
+            )
+            self._stream.start()
+            log.info("output audio stream opened (sr=%d, block=%d)", self._sr, self._block_frames)
+            return True
+        except Exception as e:
+            self._stream = None
+            self._open_attempts += 1
+            if self._open_attempts == 1 or self._open_attempts % 12 == 0:
+                log.warning("output audio stream not available yet (attempt %d): %s",
+                            self._open_attempts, e)
+            return False
 
     def __enter__(self) -> "ChunkPlayer":
-        self._stream.start()
         return self
 
     def __exit__(self, *exc):
@@ -167,19 +188,21 @@ class ChunkPlayer:
             return
         self._closed = True
         try:
-            self._stream.stop()
-            self._stream.close()
+            if self._stream is not None:
+                self._stream.stop()
+                self._stream.close()
         except Exception as e:
             log.warning("audio stream close failed: %s", e)
 
     def feed(self, chunk_int16: np.ndarray) -> None:
-        """Push one int16 chunk to the queue."""
+        """Push one int16 chunk to the queue; open the audio device if needed."""
         if chunk_int16 is None or chunk_int16.size == 0:
             return
+        # Lazily open so a host with no speakers at boot does not crash.
+        self._ensure_open()
         try:
             self._q.put_nowait(chunk_int16)
         except queue.Full:
-            # Drop oldest to avoid backing up on slow playback paths.
             try:
                 self._q.get_nowait()
             except queue.Empty:
@@ -190,18 +213,16 @@ class ChunkPlayer:
                 log.warning("playback queue dropping chunk (%d bytes)", chunk_int16.size)
 
     def feed_eos(self) -> None:
-        """Signal end-of-stream; pump() will then drain to silence on the next pass."""
+        self._ensure_open()
         try:
             self._q.put_nowait(None)
         except queue.Full:
             pass
 
     def _on_audio(self, outdata) -> None:
-        """sounddevice raw-output callback: produce up to blocksize int16 samples."""
         remaining = outdata.shape[0]
         out = bytearray()
         zero = self._zero.tobytes()
-        # If we have an unfinished current buffer, drain it first.
         while remaining > 0 and self._current is not None and self._offset < self._current.size:
             take = min(remaining, self._current.size - self._offset)
             out.extend(self._current[self._offset:self._offset + take].tobytes())
@@ -213,7 +234,6 @@ class ChunkPlayer:
             except queue.Empty:
                 item = None
             if item is None:
-                # EOS signal — fall through to silence padding.
                 self._current = None
                 n_bytes = remaining * 2
                 if n_bytes > len(zero):
@@ -344,7 +364,8 @@ def main() -> int:
     # ---- output audio queue + player ----------------------------------- #
     out_q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=64)
     player = ChunkPlayer(out_q)
-    player.__enter__()
+    # Audio device opens lazily on the first `feed().` so a headless Pi
+    # with no speakers at boot still runs without crashing.
 
     try:
         with sd.RawInputStream(
