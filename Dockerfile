@@ -26,14 +26,24 @@ RUN --mount=type=cache,target=/root/.cache \
     sh ./kotlin task :rpi-assistant:jarJvm
 
 # Collect every non-sources/javadoc jar Amper resolved into /src/deps/ so the
-# runtime stage can copy them across. Multiple runs get overlapped, but the
-# last write wins per path; that's idempotent.
+# runtime stage can copy them across. Resolver sometimes drops in BOTH an old
+# Ktor 2.x and a newer Ktor 3.x for the same artifact (caller site was compiled
+# against 3.x, JVM picks 2.x off the wildcard classpath → NoSuchMethodError).
+# We dedupe by base filename, keeping the highest version.
 RUN --mount=type=cache,target=/root/.cache \
     mkdir -p /src/deps && \
     find /root/.cache -name '*.jar' \
          -not -name '*-sources.jar' \
          -not -name '*-javadoc.jar' \
-         -exec cp --update=none {} /src/deps/ \; 2>/dev/null || true
+    | while read -r jar; do
+        # basename without the .jar, then strip trailing -<digits.digits...>[ -suffix ]
+        base=$(basename "$jar" .jar \
+              | sed -E 's/-[0-9]+(\.[0-9]+){1,}(-.*)?$//')
+        printf '%s\t%s\n' "$base" "$jar"
+    done \
+    | sort -t$'\t' -k1,1 -k2,2 -Vr \
+    | awk -F'\t' '!seen[$1]++ { print $2 }' \
+    | xargs -d'\n' -I{} cp -- {} /src/deps/
 
 FROM eclipse-temurin:21-jre AS runtime
 WORKDIR /app
