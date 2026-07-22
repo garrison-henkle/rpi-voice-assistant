@@ -238,7 +238,6 @@ class ChunkPlayer:
 # Moonshine ASR — initialized once per process                                #
 # --------------------------------------------------------------------------- #
 def _load_moonshine() -> tuple[Transcriber, ModelArch]:
-    from moonshine_voice.utils import download
     model_path, model_arch = get_model_for_language("en", ModelArch.MEDIUM_STREAMING)
     log.info("moonshine model loaded: arch=%s path=%s", model_arch.name, model_path)
     t = Transcriber(model_path=str(model_path), model_arch=model_arch)
