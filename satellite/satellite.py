@@ -177,16 +177,17 @@ def main() -> int:
             _env("XDG_RUNTIME_DIR", "/run/user/1000"),
         )
 
-    # openWakeWord: load the requested model. The `.onnx` should already be
-    # in the image thanks to the prewarm step at build time; if a different
-    # wake-word was requested at runtime, fall back to a download attempt.
+    # openWakeWord: load the requested model. We use the `tflite` framework
+    # because openwakeword 0.6's v0.5.1 GitHub release publishes ONLY `.tflite`
+    # files for the per-wake-word models — `.onnx` URLs 404. The prewarm step
+    # already baked the right `.tflite` file into the openwakeword package dir.
     try:
-        wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="onnx")
+        wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="tflite")
         log.info("wake model loaded: %s", WAKE_TH_WORD)
     except Exception as e:
         log.warning("could not load in-image wake model '%s'; retrying online: %s", WAKE_TH_WORD, e)
         try:
-            wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="onnx", download_updates=True)
+            wake_model = WakeModel(wakeword_models=[WAKE_TH_WORD], inference_framework="tflite", download_updates=True)
             log.info("wake model loaded (with download): %s", WAKE_TH_WORD)
         except Exception as e2:
             log.error("could not load wake model '%s': %s", WAKE_TH_WORD, e2)
