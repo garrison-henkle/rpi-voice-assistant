@@ -23,13 +23,14 @@ mkdir -p "$DATA_DIR"
 download_via_python() {
     url="$1"
     dest="$2"
-    tmp="${dest}.part"
-    if [ -f "$tmp" ]; then rm -f "$tmp"; fi
-    python3 - "$url" "$tmp" <<'PY'
-import os, sys, traceback, urllib.request
+    python3 - "$url" "$dest" <<'PY'
+import os, sys, urllib.request
 
-url, tmp = sys.argv[1], sys.argv[2]
+url, dest = sys.argv[1], sys.argv[2]
+tmp = dest + ".part"
 try:
+    if os.path.exists(tmp):
+        os.remove(tmp)
     with urllib.request.urlopen(url, timeout=180) as r:
         with open(tmp, "wb") as f:
             while True:
@@ -38,12 +39,17 @@ try:
                     break
                 f.write(chunk)
     if os.path.getsize(tmp) < 1024:
-        raise RuntimeError(f"payload {os.path.getsize(tmp)} B is too small; likely 404")
-    os.replace(tmp, sys.argv[2].rsplit("/", 1)[0] + "/" + os.path.basename(sys.argv[2]))
-    print(f"  downloaded {sys.argv[2]} ({os.path.getsize(sys.argv[2]):,} B)")
+        raise RuntimeError(
+            f"payload {os.path.getsize(tmp)} B is too small (likely 404 or empty body)"
+        )
+    os.replace(tmp, dest)
+    print(f"  downloaded {dest} ({os.path.getsize(dest):,} B)")
 except Exception as e:
     if os.path.exists(tmp):
-        os.remove(tmp)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
     print(f"  download failed: {url} -> {e}", file=sys.stderr)
     sys.exit(1)
 PY
