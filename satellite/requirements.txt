@@ -1,0 +1,4 @@
+sounddevice==0.5.1
+numpy==2.1.0
+openwakeword==0.6.0
+requests==2.32.3

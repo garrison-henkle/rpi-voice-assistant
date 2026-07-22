@@ -5,34 +5,41 @@ import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.encoder.PatternLayoutEncoder
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.ConsoleAppender
+import dev.henkle.rpi.assistant.api.HttpApi
 import dev.henkle.rpi.assistant.llm.OllamaKoogBridge
 import dev.henkle.rpi.assistant.tts.PiperTtsHttp
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 
-fun main() {
+fun main() = runBlocking {
     configureLogging()
     val log = LoggerFactory.getLogger("rpi-assistant")
     val cfg = AssistantConfig.fromEnv()
-    log.info("Starting rpi-assistant on :{}", cfg.orchestratorPort)
-    log.info("LLM: model='{}' baseUrl='{}'", cfg.ollamaModel, cfg.ollamaBaseUrl)
-    log.info("TTS: voice='{}' baseUrl='{}'", cfg.piperVoice, cfg.piperBaseUrl)
+    log.info("Starting rpi-assistant (HTTP :{}, model='{}', voice='{}')", cfg.httpPort, cfg.ollamaModel, cfg.piperVoice)
+    log.info("LLM: {}", cfg.ollamaBaseUrl)
+    log.info("TTS: {}", cfg.piperBaseUrl)
 
     val llm = OllamaKoogBridge(cfg.ollamaBaseUrl, cfg.ollamaModel)
     val tts = PiperTtsHttp(cfg.piperBaseUrl, cfg.piperVoice)
-    val orchestrator = LocalVoiceOrchestrator(
-        port = cfg.orchestratorPort,
+
+    val api = HttpApi(
+        port = cfg.httpPort,
+        modelId = cfg.ollamaModel,
+        voiceId = cfg.piperVoice,
         llm = llm,
         tts = tts,
         log = log,
     )
 
     Runtime.getRuntime().addShutdownHook(Thread {
-        log.info("Shutdown signal received; stopping orchestrator")
-        runCatching { orchestrator.stop() }
+        log.info("Shutdown signal received")
+        runCatching { api.stop() }
         runCatching { tts.close() }
         runCatching { llm.close() }
     })
-    orchestrator.start()
+    api.start()
+    // Block until the embedded Netty server exits (it doesn't, unless stopped).
+    Thread.currentThread().join()
 }
 
 /**

@@ -7,10 +7,7 @@ services:
     volumes:
       - ollama-models:/root/.ollama
       - ./models:/models:ro
-    # The official ollama image is minimal and does not ship curl, so a
-    # `curl http://127.0.0.1:11434/api/tags` healthcheck fails with
-    # `executable not found` even when the daemon is healthy. CLI is always
-    # available, so probe the daemon via `/bin/ollama list` instead.
+    # probe daemon via /bin/ollama list; curl is not in the ollama image
     healthcheck:
       test: ["CMD", "/bin/ollama", "list"]
       interval: 10s
@@ -23,21 +20,38 @@ services:
       dockerfile: Dockerfile
     container_name: piper
     network_mode: host
-    # piper1-gpl's Dockerfile sets ENTRYPOINT ["piper"], so a `command:` of
-    # `sh -c "..."` becomes `piper sh ...`, which the piper CLI parses as
-    # an unknown subcommand. Override the entrypoint to /bin/sh and put the
-    # full pipeline in `command:`.
+    # Exit the upstream ENTRYPOINT ["piper"] and run a pipeline instead.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         python3 -m piper.download_voices ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data && \
         exec python3 -m piper.http_server --host 0.0.0.0 --port 5000 \
-           -m ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data
+          -m ${PIPER_VOICE:-en_US-lessac-medium} --data-dir /data
     environment:
       PIPER_VOICE: en_US-lessac-medium
     healthcheck:
-      test: ["CMD", "python3", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/info').status==200 else 1)"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/info')\""]
+      interval: 15s
+      retries: 10
+      start_period: 120s
+
+  faster-whisper:
+    image: systran/faster-whisper-server:latest
+    container_name: faster-whisper
+    # 22050 Haar default; we override the model + language below.
+    networks:
+      - stack
+    command:
+      - "--model"
+      - "base.en"
+      - "--language"
+      - "en"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "10300"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:10300/v1/models')\""]
       interval: 15s
       retries: 10
       start_period: 120s
@@ -52,49 +66,60 @@ services:
         condition: service_healthy
       piper:
         condition: service_healthy
-    # Use 6059:6059 because the linux-voice-assistant container already owns
-    # port 6053 on the host (network_mode: host). Anything on the host that
-    # needs to talk to the orchestrator should connect to localhost:6059.
+      faster-whisper:
+        condition: service_healthy
+    networks:
+      - stack
+    # Reachable from the satellite over the docker bridge (service name
+    # `rpi-assistant`); host-side curl is also nice for debugging.
     ports:
       - "6059:6059/tcp"
     environment:
-      RPI_ORCHESTRATOR_PORT: 6059
-      RPI_LLM_BASE_URL: http://localhost:11434
+      RPI_ASSISTANT_HTTP_PORT: "6059"
+      RPI_LLM_BASE_URL: "http://ollama:11434"
       RPI_LLM_MODEL: "qwen3-nest-mini"
-      RPI_TTS_BASE_URL: http://localhost:5000
+      RPI_TTS_BASE_URL: "http://localhost:5000"
       RPI_TTS_VOICE: "en_US-lessac-medium"
     restart: unless-stopped
 
-  linux-voice-assistant:
-    image: ghcr.io/ohf-voice/linux-voice-assistant:latest
-    container_name: linux-voice-assistant
-    network_mode: host
-    user: "${LVA_USER_ID:-1000}:${LVA_USER_GROUP:-1000}"
-    group_add: [audio]
-    cap_add: [SYS_NICE]
-    env_file: .env
-    volumes:
-      - lva-wakeword-data:/app/local
-      - lva-wakeword-custom:/app/wakewords/custom
-      - lva-configuration:/app/configuration
-      - lva-sounds-custom:/app/sounds/custom
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
-      - /run/user/${LVA_USER_ID:-1000}:/run/user/${LVA_USER_ID:-1000}
+  assistant-satellite:
+    build:
+      context: ./satellite
+      dockerfile: Dockerfile
+    container_name: assistant-satellite
     depends_on:
       rpi-assistant:
         condition: service_started
+      faster-whisper:
+        condition: service_healthy
+    networks:
+      - stack
+    # Bind PulseAudio over the user's socket so we can read/write the host mic
+    # and speakers; user/group match the host's audio-user.
+    group_add: [audio]
+    cap_add:
+      - SYS_NICE
+    volumes:
+      - /run/user/${SATELLITE_USER_ID:-1000}:/run/user/${SATELLITE_USER_ID:-1000}
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    devices:
+      - /dev/snd
+    environment:
+      RPI_ASST_BASE_URL:  "http://rpi-assistant:6059"
+      WHISPER_BASE_URL:   "http://faster-whisper:10300"
+      SAT_WAKE_TH_WORD:   "hey_jarvis"
+      SAT_WAKE_THRESHOLD: "0.5"
+      SAT_SAMPLE_RATE:    "16000"
+      SAT_VAD_RMS_QUIET:  "200"
+      SAT_VAD_QUIET_FRAMES: "12"
+      SAT_SPK_DEVICE:     "default"
+      SAT_DEBUG:          "0"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "linux_voice_assistant"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 90s
+
+networks:
+  stack:
+    driver: bridge
 
 volumes:
   ollama-models:
-  lva-wakeword-data:
-  lva-wakeword-custom:
-  lva-configuration:
-  lva-sounds-custom:

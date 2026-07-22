@@ -17,9 +17,11 @@ import kotlinx.serialization.json.put
 import java.io.Closeable
 
 /**
- * Client for the piper1-gpl HTTP server (`POST /synthesize`). Returns WAV
- * little-endian 16-bit PCM @ 22050 Hz; the RIFF header is stripped so the
- * caller can ship raw PCM straight into ESPHome `VoiceAssistantAudio`.
+ * Client for the piper1-gpl HTTP server (`POST /synthesize`). Returns the raw
+ * WAV payload Piper emits — RIFF header + 16-bit little-endian PCM; the
+ * satellite (Python sounddevice) decodes the WAV. Previous behaviour of
+ * stripping the 44-byte RIFF header was for the old ESPHome VoiceAssistant
+ * wire format and is no longer needed.
  */
 class PiperTtsHttp(private val baseUrl: String, private val voice: String) : Closeable {
     private val client = HttpClient(CIO) {
@@ -35,17 +37,8 @@ class PiperTtsHttp(private val baseUrl: String, private val voice: String) : Clo
                 put("voice", voice)
             })
         }
-        val raw = response.bodyAsBytes()
-        if (raw.size > 44 && raw.copyOfRange(0, 4).decodeToString() == "RIFF") {
-            raw.copyOfRange(RIFF_HEADER_BYTES, raw.size)
-        } else {
-            raw
-        }
+        response.bodyAsBytes()
     }
 
     override fun close() = client.close()
-
-    private companion object {
-        const val RIFF_HEADER_BYTES = 44
-    }
 }
