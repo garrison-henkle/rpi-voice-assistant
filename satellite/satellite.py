@@ -39,7 +39,7 @@ def _env(name: str, default: str) -> str:
 
 
 ASST_BASE_URL       = _env("RPI_ASST_BASE_URL",   "http://rpi-assistant:6059")
-WHISPER_BASE_URL    = _env("WHISPER_BASE_URL",    "http://faster-whisper:10300")
+WHISPER_BASE_URL    = _env("WHISPER_BASE_URL",    "http://faster-whisper:9000")
 WAKE_TH_WORD        = _env("SAT_WAKE_TH_WORD",    "hey_jarvis")
 WAKE_THRESHOLD      = float(_env("SAT_WAKE_THRESHOLD", "0.5"))
 SAMPLE_RATE         = int(_env("SAT_SAMPLE_RATE",  "16000"))
@@ -111,7 +111,9 @@ def transcribe(wav_bytes: bytes) -> Optional[str]:
     """POST WAV to faster-whisper's /v1/audio/transcriptions; returns the text."""
     try:
         files = {"file": ("utt.wav", wav_bytes, "audio/wav")}
-        data  = {"model": "base.en", "language": "en", "response_format": "json"}
+        # 'whisper-1' is the OpenAI-API sentinel; the server uses whatever
+        # model it's currently loaded with (see WHISPER_MODEL env).
+        data  = {"model": "whisper-1", "language": "en", "response_format": "json"}
         url   = f"{WHISPER_BASE_URL}/v1/audio/transcriptions"
         log.debug("STT POST %s (%d bytes)", url, len(wav_bytes))
         r = requests.post(url, files=files, data=data, timeout=POST_TIMEOUT_S)

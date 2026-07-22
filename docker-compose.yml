@@ -36,24 +36,27 @@ services:
       start_period: 120s
 
   faster-whisper:
-    image: systran/faster-whisper-server:latest
+    # Active fork of the SYSTRAN 'faster-whisper-server' Docker Hub image
+    # (which was suspended). OpenAI-compatible `POST /v1/audio/transcriptions`
+    # is what the satellite posts to, so no client changes needed.
+    image: hwdsl2/whisper-server
     container_name: faster-whisper
-    # 22050 Haar default; we override the model + language below.
     networks:
       - stack
-    command:
-      - "--model"
-      - "base.en"
-      - "--language"
-      - "en"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "10300"
+    environment:
+      WHISPER_MODEL: "base.en"
+      WHISPER_LANGUAGE: "en"
+      WHISPER_PORT: "9000"
+      WHISPER_DEVICE: "cpu"
+      WHISPER_COMPUTE_TYPE: "int8"
+      WHISPER_THREADS: "2"
+      WHISPER_LOG_LEVEL: "INFO"
+    volumes:
+      - whisper-data:/var/lib/whisper
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:10300/v1/models')\""]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/v1/models')\""]
       interval: 15s
-      retries: 10
+      retries: 15
       start_period: 120s
 
   rpi-assistant:
@@ -107,7 +110,7 @@ services:
       - /dev/snd
     environment:
       RPI_ASST_BASE_URL:  "http://rpi-assistant:6059"
-      WHISPER_BASE_URL:   "http://faster-whisper:10300"
+      WHISPER_BASE_URL:   "http://faster-whisper:9000"
       SAT_WAKE_TH_WORD:   "hey_jarvis"
       SAT_WAKE_THRESHOLD: "0.5"
       SAT_SAMPLE_RATE:    "16000"
@@ -123,3 +126,4 @@ networks:
 
 volumes:
   ollama-models:
+  whisper-data:
