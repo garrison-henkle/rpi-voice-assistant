@@ -41,12 +41,22 @@ RUN python3 /app/prewarm-moonshine.py && \
 COPY satellite.py .
 
 # Bind the libasound2-plugin-bluez virtual PCM `bluealsa` so aplay/sounddevice
-# can pick it up by name. The host's bluealsa service (system-wide D-Bus) is
-# the audio bridge; this stanza just tells the ALSA side how to address it.
-# We hard-code the Mac as a build-time placeholder; docker-compose will mount
-# /etc/asound.conf in via a future PR so the address can change per room.
+# can pick it up by name. We wrap it in the `plug` plugin which performs
+# rate / format conversion on the fly — the bluealsa plugin only accepts
+# 44.1 / 48 kHz mono+stereo (SBC codec constraint), but Piper emits 22050 Hz
+# mono and the chunk player wants int16 stereo. The `plug` wrapper resamples
+# and upmixes transparently so the satellite can keep writing at 22050 Hz
+# mono and still have the audio reach the Sonos at 48 kHz stereo.
+#
+# The Sonos MAC is templated by compose via SONOS_BT_MAC at container start;
+# we ship a placeholder here so the recipe validates during image build.
 RUN printf '%s\n' \
         'pcm.!bluealsa {' \
+        '  type plug' \
+        '  slave.pcm "bluealsa_hw"' \
+        '  slave.rate 48000' \
+        '}' \
+        'pcm.bluealsa_hw {' \
         '  type bluealsa' \
         '  device "74:CA:60:A6:F3:F8"' \
         '  profile "a2dp"' \
