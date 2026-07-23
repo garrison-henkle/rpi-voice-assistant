@@ -59,11 +59,127 @@ VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "200"))
 VAD_QUIET_FRAMES    = int(_env("SAT_VAD_QUIET_FRAMES", "12"))   # 80 ms each
 VAD_MAX_FRAMES      = int(_env("SAT_VAD_MAX_FRAMES",   "1250"))  # 100 s safety cap
 SPK_DEVICE          = _env("SAT_SPK_DEVICE", "default")
+INPUT_DEVICE_RAW    = _env("SAT_INPUT_DEVICE", "")           # "" → auto-pick
+OUTPUT_DEVICE_RAW   = _env("SAT_OUTPUT_DEVICE", "")          # "" → auto-pick
 DEBUG               = _env("SAT_DEBUG", "0") == "1"
 BLOCK_FRAMES        = int(_env("SAT_BLOCK_FRAMES", "1280"))   # 80 ms @ 16 kHz
 POST_TIMEOUT_S      = float(_env("SAT_POST_TIMEOUT_S", "60"))
 SPK_SAMPLE_RATE     = int(_env("SPK_SAMPLE_RATE",   "22050"))  # Piper output rate
 SPK_CHUNK_MS        = int(_env("SPK_CHUNK_MS",      "80"))     # output block size
+
+
+# --------------------------------------------------------------------------- #
+# Audio device probing + auto-selection                                       #
+# --------------------------------------------------------------------------- #
+# PortAudio lists different views of the same hardware depending on whether
+# the host ALSA plugin enumerates capture subdevices or whether pipewire/pulse
+# routes through. We log the table at boot so mis-detection is visible, and
+# we let `SAT_INPUT_DEVICE` / `SAT_OUTPUT_DEVICE` either name a device by id,
+# name fragment, or one of the special tokens ``"default"`` / ``"pulse"`` /
+# ``"alsa"`` to force a host API. Anything else leaves us on auto-detection:
+# prefer the first device whose ``max_input_channels > 0`` at 16 kHz.
+
+
+def _device_table() -> list[dict]:
+    """Snapshot of every PortAudio device + whether it supports 16 kHz mono."""
+    table: list[dict] = []
+    for i, d in enumerate(sd.query_devices()):
+        sr_ok = False
+        try:
+            sd.check_input_settings(
+                device=i, samplerate=SAMPLE_RATE, channels=1, dtype="int16"
+            )
+            sr_ok = True
+        except Exception:
+            # Not a 16kHz mono input — fine for output-only devices.
+            try:
+                sd.check_output_settings(
+                    device=i, samplerate=SAMPLE_RATE, channels=1, dtype="int16"
+                )
+                sr_ok = True
+            except Exception:
+                sr_ok = False
+        table.append({
+            "id": i,
+            "name": d["name"],
+            "host_api": sd.query_hostapis()[d["hostapi"]]["name"],
+            "in": d["max_input_channels"],
+            "out": d["max_output_channels"],
+            "sr16k_ok": sr_ok,
+        })
+    return table
+
+
+def _log_device_table() -> None:
+    log.info("PortAudio device table:")
+    for d in _device_table():
+        marker = "*" if (d["in"] > 0 and d["sr16k_ok"]) else " "
+        log.info(" %s %2d  in=%-3d out=%-3d 16k_ok=%-5s  api=%-12s  %r",
+                 marker, d["id"], d["in"], d["out"], d["sr16k_ok"],
+                 d["host_api"], d["name"])
+
+
+def _parse_overrides() -> tuple[object, object]:
+    """Parse SAT_INPUT_DEVICE / SAT_OUTPUT_DEVICE into (input, output) picks.
+
+    Accepts either an integer id (PortAudio lists it), a substring of the
+    device name (matched case-insensitively), or the special tokens ``default``
+    / ``pulse`` / ``alsa`` which PortAudio / sounddevice understand as host
+    API selectors. Returns a tuple of (input_override, output_override), each
+    either a concrete int, a string, or ``False`` to force "let sounddevice
+    pick the OS default".
+    """
+    def _one(raw: str, kind: str) -> object:
+        s = raw.strip()
+        if not s:
+            return None  # auto
+        if s.isdigit():
+            return int(s)
+        low = s.lower()
+        if low in ("default", "pulse", "alsa"):
+            return s
+        # Substring match against the table
+        for d in _device_table():
+            if s.lower() in d["name"].lower():
+                if kind == "input" and d["in"] > 0:
+                    return d["id"]
+                if kind == "output" and d["out"] > 0:
+                    return d["id"]
+        return s  # let sounddevice try — it'll raise a clearer error.
+
+    return _one(INPUT_DEVICE_RAW, "input"), _one(OUTPUT_DEVICE_RAW, "output")
+
+
+def pick_input_device() -> object:
+    """Return the PortAudio device id (or string) we should open for capture."""
+    override, _ = _parse_overrides()
+    if override is not None:
+        log.info("input device override: %r", override)
+        return override
+    table = _device_table()
+    for d in table:
+        if d["in"] > 0 and d["sr16k_ok"]:
+            log.info("auto-picked input device id=%d %r", d["id"], d["name"])
+            return d["id"]
+    # Fall back to "default" — sounddevice will raise a clearer message.
+    log.warning("no 16 kHz capture device visible; falling back to 'default'")
+    return "default"
+
+
+def pick_output_device() -> object:
+    override, _ = _parse_overrides()
+    if override is not None:
+        log.info("output device override: %r", override)
+        return override
+    table = _device_table()
+    # Prefer an output device whose name matches the input we picked (USB
+    # audio gadgets typically have both directions on the same hw:0,0).
+    for d in table:
+        if d["out"] > 0 and d["sr16k_ok"]:
+            log.info("auto-picked output device id=%d %r", d["id"], d["name"])
+            return d["id"]
+    log.warning("no 16 kHz output device visible; falling back to 'default'")
+    return "default"
 
 
 # --------------------------------------------------------------------------- #
@@ -140,7 +256,7 @@ class ChunkPlayer:
         q: "queue.Queue[Optional[np.ndarray]]",
         sr: int = SPK_SAMPLE_RATE,
         block_ms: int = SPK_CHUNK_MS,
-        on_underrun: Optional[Callable[[int], None]] = None,
+        device: object = None,
     ):
         self._q = q
         sr_run = sr
@@ -153,6 +269,7 @@ class ChunkPlayer:
         self._closed = False
         self._stream: Optional[sd.RawOutputStream] = None
         self._open_attempts = 0
+        self._device = device if device is not None else SPK_DEVICE
 
     def _ensure_open(self) -> bool:
         if self._stream is not None and not self._closed:
@@ -163,18 +280,19 @@ class ChunkPlayer:
                 blocksize=self._block_frames,
                 channels=CHANNELS,
                 dtype="int16",
-                device=SPK_DEVICE,
+                device=self._device,
                 callback=lambda out, _f, _t, _s: self._on_audio(out),
             )
             self._stream.start()
-            log.info("output audio stream opened (sr=%d, block=%d)", self._sr, self._block_frames)
+            log.info("output audio stream opened (sr=%d, block=%d, device=%r)",
+                     self._sr, self._block_frames, self._device)
             return True
         except Exception as e:
             self._stream = None
             self._open_attempts += 1
             if self._open_attempts == 1 or self._open_attempts % 12 == 0:
-                log.warning("output audio stream not available yet (attempt %d): %s",
-                            self._open_attempts, e)
+                log.warning("output audio stream not available yet (attempt %d, device=%r): %s",
+                            self._open_attempts, self._device, e)
             return False
 
     def __enter__(self) -> "ChunkPlayer":
@@ -339,9 +457,18 @@ def main() -> int:
         ASST_BASE_URL, WAKE_TH_WORD, WAKE_THRESHOLD, SPK_SAMPLE_RATE, BLOCK_FRAMES,
     )
 
+    # ---- audio devices -------------------------------------------------- #
+    # Print the full PortAudio device table so mis-detection is visible at
+    # boot, then pick capture + playback devices honoring SAT_INPUT_DEVICE /
+    # SAT_OUTPUT_DEVICE overrides. Auto-detection prefers the first device
+    # whose max_input_channels > 0 and reports 16 kHz int16 mono support.
+    _log_device_table()
+    in_dev = pick_input_device()
+    out_dev = pick_output_device()
+
     if not os.path.isdir(_env("XDG_RUNTIME_DIR", "/run/user/1000") + "/pulse"):
         log.warning(
-            "PulseAudio socket not mounted at %s/pulse — playback may fail.",
+            "PulseAudio socket not mounted at %s/pulse — playback may fall back to ALSA.",
             _env("XDG_RUNTIME_DIR", "/run/user/1000"),
         )
 
@@ -363,7 +490,7 @@ def main() -> int:
 
     # ---- output audio queue + player ----------------------------------- #
     out_q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=64)
-    player = ChunkPlayer(out_q)
+    player = ChunkPlayer(out_q, device=out_dev)
     # Audio device opens lazily on the first `feed().` so a headless Pi
     # with no speakers at boot still runs without crashing.
 
@@ -373,8 +500,9 @@ def main() -> int:
             blocksize=BLOCK_FRAMES,
             dtype="int16",
             channels=CHANNELS,
-            device=None,
+            device=in_dev,
         ) as mic:
+            log.info("listening for wake word ('%s') on input device=%r …", WAKE_TH_WORD, in_dev)
             log.info("listening for wake word ('%s') on default input …", WAKE_TH_WORD)
 
             state = "idle"

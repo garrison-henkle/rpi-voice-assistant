@@ -2,11 +2,14 @@ FROM python:3.11-slim-bookworm
 
 # sounddevice uses PortAudio → libportaudio2 on Debian.
 # moonshine-voice needs libsndfile1 for its wav_io; ffmpeg for any
-# compressed audio we may need.
+# compressed audio we may need. alsa-utils ships `arecord`/`aplay`/`amixer`
+# for repeatable in-container debugging of the device-routing layer (libasound2
+# itself comes in transitively with libportaudio2 — we only add the CLI tools).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
         libsndfile1 \
         ffmpeg \
+        alsa-utils \
         ca-certificates \
         curl \
     && rm -rf /var/lib/apt/lists/*
