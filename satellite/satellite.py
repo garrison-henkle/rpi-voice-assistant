@@ -183,29 +183,26 @@ def _bluealsa_alive() -> bool:
 def _accepts_speaker_sr(device) -> bool:
     """Probe whether ``device`` accepts the speaker sample rate we need.
 
-    Falls back to a host-API plug wrapper (``plug:<id>``, ``plughw:<id>``,
-    ``default``) when the picked device itself is a raw ``hw:`` PCM that
-    doesn't enumerate the rate Piper emits. Plug sample-rate conversion is
-    transparent to the user; volume and routing are unchanged.
+    Sounddevice won't dispatch raw device strings like ``plug:N`` /
+    ``plughw:0,0`` (which is why those fall through with 'No matching
+    device'); only entries PortAudio enumerated forward work. Use either
+    the device id directly or one of the host-API aliases (``default``,
+    ``sysdefault``, ``pulse``). ``default``/``sysdefault`` go through dmix
+    and ALSA's plug plugins, which transparently resample 22050 -> 48000.
     """
     sr = SPK_SAMPLE_RATE
-    candidates: list[object] = [device]
-    if isinstance(device, int):
-        candidates.extend([f"plug:{device}", "default", "plug:default"])
-    elif isinstance(device, str):
-        if device.startswith(("plughw:", "plug:")):
-            pass
-        else:
-            candidates.extend([f"plug:{device}", "default", "plug:default"])
-        if device.startswith("hw:"):
-            candidates.append("plughw:" + device[len("hw:"):])
-    for c in candidates:
-        try:
-            sd.check_output_settings(device=c, samplerate=sr, channels=1, dtype="int16")
-            return True
-        except Exception:
-            continue
-    return False
+    try:
+        sd.check_output_settings(device=device, samplerate=sr, channels=1, dtype="int16")
+        return True
+    except Exception:
+        return False
+
+
+# Host-API aliases that route through ALSA's plug/dmix and therefore
+# transparently resample the piper 22 kHz stream to 48000. We probe these
+# in priority order — they're the only sure-fire way to accept a rate
+# the picked hw: PCM doesn't natively enumerate.
+_RESAMPLE_PROBES = ("default", "sysdefault")
 
 
 def pick_input_device() -> object:
@@ -233,51 +230,38 @@ def pick_output_device() -> object:
     # Smart auto: prefer BT (bluealsa) when a sink is paired on the host
     # so that moving the satellite to a wired speaker only requires turning
     # BT off — no env var edit. We probe bluealsa first; on failure we fall
-    # back to the first device that accepts the Piper output SR via a
-    # plug wrapper (resampling transparently), and only then to the raw
-    # 16-kHz-capable id when nothing else works.
+    # back to ALSA's `default` / `sysdefault` host-API alias which routes
+    # through dmix + the plug plugin so 22 kHz is transparently resampled
+    # to whatever the speaker accepts. We deliberately avoid raw `hw:N`
+    # ids (which are enumerated but reject 22050 Hz with paInvalidSampleRate)
+    # because the playback stream opens silently and the user hears nothing.
     if _bluealsa_alive():
-        # Verify bluealsa accepts our Piper rate. With our container's plug
-        # this always does, but other hosts (e.g. bluealsa-alsa-bridge on
-        # a flat /etc/asound.conf) may not.
         if _accepts_speaker_sr("bluealsa"):
             log.info("auto-picked output device: 'bluealsa' (BT sink alive)")
             return "bluealsa"
         log.info("bluealsa probe OK but it rejects SR=%d; looking elsewhere",
                  SPK_SAMPLE_RATE)
-    log.info("bluealsa unavailable; falling back to first 16 kHz stereo device")
+    log.info("bluealsa unavailable; looking for a SR=%d-resampling host-API alias",
+             SPK_SAMPLE_RATE)
+    for probe in _RESAMPLE_PROBES:
+        if _accepts_speaker_sr(probe):
+            log.info("auto-picked output device: %r (resamples %d Hz)",
+                     probe, SPK_SAMPLE_RATE)
+            return probe
+    # Last resort: pick the first device whose direct probe accepts 22050.
+    # This typically returns 'sysdefault' or 'default' on a vanilla Pi; on
+    # a host with neither it falls through to id=0 (a raw hw: PCM that
+    # will fail to open the playback stream — the user will not hear
+    # anything).
     table = _device_table()
-    # First pass: prefer plug-wrapped virtual PCMs (front, default, …) so
-    # ALSA converts 22050 -> 48000 transparently. These always work
-    # regardless of the device's native rate.
-    plug_names = ("front", "surround40", "surround51", "surround71",
-                  "iec958", "spdif", "dmix")
     for d in table:
-        if d["out"] > 0 and d["sr16k_ok"]:
-            if any(p in d["name"] for p in plug_names) or d["name"] in plug_names:
-                wrapped = f"plug:{d['id']}"
-                if _accepts_speaker_sr(wrapped):
-                    log.info("auto-picked output device %r (plug wrapper over id=%d %r)",
-                             wrapped, d["id"], d["name"])
-                    return wrapped
-    # Second pass: probe every candidate with the actual Piper rate via the
-    # plug wrapper; pick the first that accepts. This is what made 22050
-    # playback start working on reSpeaker, which only natively does 48k.
-    for d in table:
-        if d["out"] > 0 and d["sr16k_ok"]:
-            wrapped = f"plug:{d['id']}"
-            if _accepts_speaker_sr(wrapped):
-                log.info("auto-picked output device %r (plug wrapper over id=%d %r)",
-                         wrapped, d["id"], d["name"])
-                return wrapped
-    # Last resort: accept raw hw and pray ALSA converts.
-    for d in table:
-        if d["out"] > 0 and d["sr16k_ok"]:
-            log.warning("no device accepted SR=%d plug; falling back to id=%d %r "
-                        "(playback may refuse to start)",
-                        SPK_SAMPLE_RATE, d["id"], d["name"])
+        if d["out"] > 0 and d["sr16k_ok"] and _accepts_speaker_sr(d["id"]):
+            log.info("auto-picked output device id=%d %r (native SR match)",
+                     d["id"], d["name"])
             return d["id"]
-    log.warning("no 16 kHz output device visible; falling back to 'default'")
+    log.warning("no device accepted SR=%d; falling back to 'default' "
+                "(playback may still refuse to start)",
+                SPK_SAMPLE_RATE)
     return "default"
 
 
