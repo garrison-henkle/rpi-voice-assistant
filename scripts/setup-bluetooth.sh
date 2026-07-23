@@ -16,6 +16,7 @@
 set -euo pipefail
 
 MAC="${1:-74:CA:60:A6:F3:F8}"
+LE_MAC="${2:-50:CE:C9:AB:94:72}"
 SCAN_SECONDS="${SCAN_SECONDS:-25}"
 
 LOG()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -26,7 +27,12 @@ command -v wpctl >/dev/null || DIE "wireplumber missing"
 
 LOG "Press the Sonos BT button when you see this prompt -- the script starts scan immediately after."
 sleep 1
-LOG "Single-session bluetoothctl (scan ${SCAN_SECONDS}s, then pair/trust/connect on $MAC)"
+# Use DisplayYesNo so Sonos gets a real SSP exchange -- some Sonos models
+# reject NoInputNoOutput because they advertise a confirmation capability
+# even though the user-action is just 'confirm' (no actual PIN).
+AGENT_CAP="${AGENT_CAP:-DisplayYesNo}"
+
+LOG "Single-session bluetoothctl (scan ${SCAN_SECONDS}s, then pair/trust/connect on $MAC with $AGENT_CAP agent)"
 
 # Build a command stream that drives a single bluetoothctl session.
 CMD_STREAM=$(
@@ -43,7 +49,7 @@ trap "rm -f $TMPFIFO" EXIT
 mkfifo "$TMPFIFO"
 
 # Reader: bluetoothctl in a PTY, reading from the FIFO.
-( exec script -q -c "bluetoothctl --agent NoInputNoOutput" /dev/null ) < "$TMPFIFO" &
+( exec script -q -c "bluetoothctl --agent $AGENT_CAP" /dev/null ) < "$TMPFIFO" &
 BTPID=$!
 
 # Writer: write commands with sleeps.
