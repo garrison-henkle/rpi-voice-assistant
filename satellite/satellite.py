@@ -55,9 +55,9 @@ WAKE_TH_WORD        = _env("SAT_WAKE_TH_WORD",    "hey_rhasspy")
 WAKE_THRESHOLD      = float(_env("SAT_WAKE_THRESHOLD", "0.5"))
 SAMPLE_RATE         = int(_env("SAT_SAMPLE_RATE",  "16000"))
 CHANNELS            = 1
-VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "200"))
+VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "150"))
 VAD_QUIET_FRAMES    = int(_env("SAT_VAD_QUIET_FRAMES", "12"))   # 80 ms each
-VAD_MAX_FRAMES      = int(_env("SAT_VAD_MAX_FRAMES",   "1250"))  # 100 s safety cap
+VAD_MAX_FRAMES      = int(_env("SAT_VAD_MAX_FRAMES",   "480"))  # 38 s safety cap
 # 1 (default) → push each captured 80 ms block into moonshine's
 # `add_audio` + `update_transcription` loop while we are still recording,
 # so by the time VAD fires the transcript is already final. 0 → keep the
@@ -413,6 +413,10 @@ def _synthesise_chime(
 # window every time the player receives a PCM chunk; once the
 # orchestrator finishes streaming audio the window expires.
 _WAKE_MUTE_AFTER_FEED_S: float = 4.0
+# Extra mute applied when the orchestrator signals end-of-stream
+# (chime + ack all rendered). Sized for the 1–2 s ringing of a Sonos
+# speaker plus the BT codec's lag in returning to silence.
+_WAKE_MUTE_AFTER_EOS_S: float = 3.0
 _wake_mute_until: float = 0.0
 _wake_mute_lock = threading.Lock()
 # Moonshine's streaming Transcriber is stateful (start/add/stop over an
@@ -596,6 +600,18 @@ class ChunkPlayer:
 
     def feed_eos(self) -> None:
         self._ensure_open()
+        # The orchestrator just finished streaming audio (chime + ack
+        # all drained). Keep the wake detector muted for another
+        # ~WAKE_MUTE_AFTER_EOS_S so the reSpeaker doesn't catch the
+        # trailing edge of the Sonos playback and re-fire the wake
+        # word. The chime's last note and the piper sentence's final
+        # phoneme can ring in the room for ~1–2 s; the extra mute
+        # window absorbs that without making the system feel slow.
+        global _wake_mute_until
+        with _wake_mute_lock:
+            _wake_mute_until = max(
+                _wake_mute_until, time.monotonic() + _WAKE_MUTE_AFTER_EOS_S
+            )
         try:
             self._q.put_nowait(None)
         except queue.Full:
