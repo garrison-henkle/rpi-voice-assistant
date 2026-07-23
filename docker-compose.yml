@@ -5,6 +5,13 @@ services:
     container_name: ollama
     networks:
       - stack
+    # Keep the qwen3 weights resident in RAM between requests — without
+    # this ollama unloads after 5 min idle and the first wake of a new
+    # conversation pays a cold-load tax of 6–10 s. 30 m covers a normal
+    # kitchen / office usage session.
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_NUM_PARALLEL: "1"
     volumes:
       - ollama-models:/root/.ollama
       - ./models:/models:ro
@@ -91,7 +98,12 @@ services:
       SAT_WAKE_THRESHOLD: "0.5"
       SAT_SAMPLE_RATE:    "16000"
       SAT_VAD_RMS_QUIET:  "200"
-      SAT_VAD_QUIET_FRAMES: "12"
+      # 8 frames × 80 ms = 640 ms of trailing silence before the satellite
+      # treats the user as done. At 12 (the old default) we sat 960 ms
+      # after the last word waiting for noise that never came, eating
+      # ~320 ms of perceived end-to-end latency. moonshine is robust to
+      # trailing silence so dropping to 8 is safe in practice.
+      SAT_VAD_QUIET_FRAMES: "8"
       # SAT_OUTPUT_DEVICE picks the playback sink. Empty / "auto" lets the
       # satellite decide at boot:
       #   1. Probe bluealsa (BT sink paired + connected?) → use if alive.

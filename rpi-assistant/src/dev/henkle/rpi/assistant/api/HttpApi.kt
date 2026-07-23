@@ -208,7 +208,12 @@ class HttpApi(
                             val remainder = pending.substring(boundary + 1)
                             unfinished.clear()
                             unfinished.append(remainder)
-                            if (slice.isNotBlank() && slice.length >= MIN_FLUSH_CHARS) {
+                            // Kick Piper as soon as the LLM emits a complete
+                            // sentence — even a short one. This trims ~300 ms
+                            // off the first-audio latency versus MIN_FLUSH_CHARS=24
+                            // which made piper wait until the *first* sentence
+                            // passed 24 chars regardless of boundary position.
+                            if (slice.isNotBlank()) {
                                 flushSlice(slice, isFinal = false)
                             }
                         } else if (pending.length >= MAX_FLUSH_CHARS) {
@@ -244,7 +249,15 @@ class HttpApi(
     }
 
     companion object {
+        // Legacy: sentence was held until it cleared this bar to keep piper
+        // synthesis off the LLM critical path. We now hand every complete
+        // sentence to piper as soon as it appears (see flushSlice above) so
+        // MIN_FLUSH_CHARS is unused. Kept the constant for reference.
+        @Suppress("unused")
         private const val MIN_FLUSH_CHARS = 24
-        private const val MAX_FLUSH_CHARS = 90
+        // Hard ceiling: if the LLM rambles without sentence punctuation
+        // and crosses this many chars, force a piper flush so the user
+        // actually hears something before the full response arrives.
+        private const val MAX_FLUSH_CHARS = 70
     }
 }
