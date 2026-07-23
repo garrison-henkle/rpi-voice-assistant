@@ -404,6 +404,27 @@ def _synthesise_chime(
     return (pcm * 32767).astype(np.int16)
 
 
+# ---------------------------------------------------------------------------
+# Wake-word mute + ASR lock (process-wide)
+# ---------------------------------------------------------------------------
+# The Sonos speaker leaks into the reSpeaker mic — without muting the
+# wake detector during playback we loop: chime plays → mic "hears" →
+# fake wake → POST → another chime → repeat. We refresh a 4-s mute
+# window every time the player receives a PCM chunk; once the
+# orchestrator finishes streaming audio the window expires.
+_WAKE_MUTE_AFTER_FEED_S: float = 4.0
+_wake_mute_until: float = 0.0
+_wake_mute_lock = threading.Lock()
+# Moonshine's streaming Transcriber is stateful (start/add/stop over an
+# internal VAD stream ID). It is NOT safe to call from multiple
+# threads concurrently — the C-API assertion
+#   "Adding new audio for stream with ID 1 but VAD is not active"
+# fires when two utterances overlap. With single-user semantics we
+# serialise: if a turn is already in flight, drop the overlapping
+# wake word instead of double-firing the orchestrator.
+_handle_lock = threading.Lock()
+
+
 def _prewarm_ollama() -> None:
     """Force ollama to load the active chat model + keep it resident.
 
@@ -551,6 +572,16 @@ class ChunkPlayer:
             return
         # Lazily open so a host with no speakers at boot does not crash.
         self._ensure_open()
+        # Extend the wake-word mute window so the reSpeaker mic doesn't
+        # interpret its own chime/ack as a fresh wake phrase. We pick a
+        # quiet window that grows with the chunk length so a single
+        # long Piper sentence still mutes the whole phrase (>2 s) while
+        # a stale tail of silence drops the lock.
+        ms_of_audio = chunk_int16.size / self._sr * 1000.0
+        mute_for_s = max(_WAKE_MUTE_AFTER_FEED_S, ms_of_audio / 1000.0 + 1.5)
+        global _wake_mute_until
+        with _wake_mute_lock:
+            _wake_mute_until = max(_wake_mute_until, time.monotonic() + mute_for_s)
         try:
             self._q.put_nowait(chunk_int16)
         except queue.Full:
@@ -813,16 +844,28 @@ def main() -> int:
                 data, _overflow = mic.read(BLOCK_FRAMES)
                 block = np.frombuffer(data, dtype=np.int16).copy()
 
+                # Drop wake-word events while the playback (chime / TTS
+                # ack) is on. Without this the reSpeaker captures the
+                # Sonos output, the wake model scores "hey rhasspy" off
+                # the chime waveform, and we loop into a wake + chime +
+                # wake + chime cascade.
+                with _wake_mute_lock:
+                    muted = time.monotonic() < _wake_mute_until
+
                 if state == "idle":
-                    preds = wake_model.predict(block)
-                    score = max(preds.values()) if preds else 0.0
-                    if DEBUG:
-                        log.debug("wake score=%.3f", score)
-                    if score >= WAKE_THRESHOLD:
-                        log.info("WAKE detected (score=%.3f)", score)
-                        rec_buffer = [block]
-                        silence_count = 0
-                        state = "recording"
+                    if muted:
+                        if DEBUG:
+                            log.debug("wake suppressed (mute window)")
+                    else:
+                        preds = wake_model.predict(block)
+                        score = max(preds.values()) if preds else 0.0
+                        if DEBUG:
+                            log.debug("wake score=%.3f", score)
+                        if score >= WAKE_THRESHOLD:
+                            log.info("WAKE detected (score=%.3f)", score)
+                            rec_buffer = [block]
+                            silence_count = 0
+                            state = "recording"
                 else:
                     rec_buffer.append(block)
                     if rms_level(block) < VAD_RMS_QUIET:
@@ -879,7 +922,30 @@ def _handle_utterance(
     shaves ~300 ms off the end-to-end latency vs the batch
     `transcribe_without_streaming` path. With streaming off, we
     concatenate into one PCM array before feeding the offline transcribe.
+
+    Wraps the body in a non-blocking [_handle_lock] because moonshine's
+    streaming Transcriber is process-state — calling start() twice
+    without an intervening stop() trips
+      "Adding new audio for stream with ID 1 but VAD is not active"
+    on the second invocation. With single-user semantics we serialise:
+    a wake that fires while the previous turn is still in flight is
+    dropped with a log so it can be revisited as barge-in work.
     """
+    if not _handle_lock.acquire(blocking=False):
+        log.warning("previous turn still in flight — dropping overlapping wake")
+        return
+    try:
+        _handle_utterance_locked(chunks, transcriber, out_q, player)
+    finally:
+        _handle_lock.release()
+
+
+def _handle_utterance_locked(
+    chunks: list[np.ndarray],
+    transcriber: Transcriber,
+    out_q: "queue.Queue[Optional[np.ndarray]]",
+    player: ChunkPlayer,
+) -> None:
     if not chunks:
         log.info("utterance empty — discard")
         return
