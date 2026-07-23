@@ -24,67 +24,81 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
-# Quick disk check. qwen3:1.7b is ~1.4 GB and faster-whisper base.en adds
-# ~140 MB; the Ollama volume + container layers live under /var/lib/docker
-# on the Pi's root FS, so an almost-full SD card breaks the pull mid-flight.
+# Quick disk check. qwen3:1.7b is ~1.4 GB and moonshine-medium adds
+# ~450 MB on top of the un-modified pull layers; the Ollama volume +
+# container layers live under /var/lib/docker on the Pi's root FS, so an
+# almost-full SD card breaks the pull mid-flight.
 free_mb=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
-if [[ -n "$free_mb" && "$free_mb" -lt 4096 ]]; then
-  WARN "/var/lib/docker has only ${free_mb} MB free; need ~3 GB for qwen3:1.7b + faster-whisper base.en"
+if [[ -n "$free_mb" && "$free_mb" -lt 5120 ]]; then
+  WARN "/var/lib/docker has only ${free_mb} MB free; need ~5 GB for qwen3:1.7b + moonshine-medium bake"
   WARN "Free up space or move /var/lib/docker to a bigger volume first"
 fi
 
-# Wait for ollama to answer the tags endpoint. First-boot is slow on a Pi
-# (SSH keypair generation + CPU inference-engine init can take 60-90 s), so
-# we allow up to 3 minutes. We probe from the *host* rather than from inside
-# the ollama container because the official ollama image is minimal and does
-# not ship curl; probing inside produced a false-negative timeout even when
-# the daemon was healthy. With `network_mode: host`, the daemon shares the
-# host's :11434, so a host-side curl is the canonical liveness check.
-wait_for_ollama() {
-  local tries=180 elapsed=0
-  while (( tries-- > 0 )); do
+# Wait for a container's `healthcheck` to transition to `healthy`.
+# Polls `docker inspect --format '{{.State.Health.Status}}'` once a second
+# and bails after `[max_tries]` tries (~4 minutes is typical for ollama's
+# `start_period: 90s + 15 retries × 10s` healthcheck from compose.yml).
+#
+# We intentionally poll the container's own healthcheck instead of curling
+# `127.0.0.1:11434` from the host because every service in this stack now
+# lives on the `stack` bridge, so ollama :11434 is not exposed on the host
+# loopback and a host-side probe would spin for the full timeout window
+# before failing (fixed in the streaming refactor — see docker-compose.yml).
+wait_for_container_healthy() {
+  local name="$1" max_tries="$2" tries elapsed=0
+  while (( tries++ < max_tries )); do
     elapsed=$((elapsed + 1))
-    if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-      LOG "ollama up after ${elapsed}s"
-      return 0
-    fi
-    sleep 1
+    local status
+    status=$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)
+    case "$status" in
+      healthy)
+        LOG "${name} healthy after ~${elapsed}s"
+        return 0
+        ;;
+      starting|unhealthy|missing|"")
+        if (( tries % 10 == 0 )); then
+          printf '  [%s] %s container status: %s\n' "$(date +%H:%M:%S)" "$name" "$status"
+        fi
+        sleep 1
+        ;;
+    esac
   done
-  WARN "host :11434 did not answer within 3 minutes"
-  WARN "is the ollama container running?"
-  docker ps --filter name=^ollama$ --format '  {{.Names}}\t{{.Status}}\t{{.Ports}}' >&2 || true
-  WARN "Last 20 lines of ollama log:"
-  docker logs --tail=20 ollama >&2 || true
+  WARN "${name} did not become healthy within ${max_tries}s"
+  docker ps --filter name=^${name}$ --format '  {{.Names}}\t{{.Status}}\t{{.Ports}}' >&2 || true
+  WARN "Last 20 lines of ${name} log:"
+  docker logs --tail=20 "$name" >&2 || true
   return 1
 }
 
 export DOCKER_BUILDKIT=1
 
-LOG "1/6  Starting ollama + piper first (so they warm before rpi-assistant)"
+LOG "1/7  Starting ollama + piper first (so they warm before rpi-assistant)"
 docker compose up -d ollama piper
-wait_for_ollama
 
-LOG "2/6  Pulling qwen3:1.7b (≈1.4 GB; progress prints inline)"
+LOG "2/7  Waiting for ollama healthy (compose healthcheck; max 4 minutes)"
+wait_for_container_healthy ollama 240
+
+LOG "2b/7 Waiting for piper healthy (compose healthcheck; max 4 minutes)"
+wait_for_container_healthy piper 240
+
+LOG "3/7  Pulling qwen3:1.7b (≈1.4 GB; progress prints inline)"
 # `-i` only — let ollama print its progress to our stdout. Avoid `-t` so no
 # TTY allocation is attempted (which can cause hard-to-debug exits on Pi over
 # SSH if the upstream session isn't a real PTY).
 docker exec -i ollama ollama pull qwen3:1.7b
 
-LOG "3/6  Building 'qwen3-nest-mini' tag from models/qwen3-nest-mini.Modelfile"
+LOG "4/7  Building 'qwen3-nest-mini' tag from models/qwen3-nest-mini.Modelfile"
 # `ollama create` is idempotent; recreating over a stale tag is fine.
 docker exec -i ollama ollama create qwen3-nest-mini -f /models/qwen3-nest-mini.Modelfile
 
-LOG "4/6  Building faster-whisper, rpi-assistant and assistant-satellite images"
-docker compose build faster-whisper rpi-assistant assistant-satellite
+LOG "5/7  Building rpi-assistant and assistant-satellite images"
+docker compose build rpi-assistant assistant-satellite
 
-LOG "5/6  bringing up faster-whisper + rpi-assistant and waiting for healthy"
-docker compose up -d faster-whisper rpi-assistant
+LOG "6/7  Bringing up rpi-assistant + assistant-satellite"
+docker compose up -d rpi-assistant assistant-satellite
 
-LOG "6/6  starting assistant-satellite (mic + wake + audio)"
-docker compose up -d assistant-satellite
-
+LOG "7/7  Done — status + tail"
 echo
-LOG "Status:"
 docker compose ps
 echo
 LOG "Tail logs (Ctrl-C to detach):"
