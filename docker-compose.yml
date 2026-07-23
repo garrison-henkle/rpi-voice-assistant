@@ -82,6 +82,7 @@ services:
       - /run/user/${SATELLITE_USER_ID:-1000}:/run/user/${SATELLITE_USER_ID:-1000}
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+      - /run/dbus:/run/dbus:ro
     devices:
       - /dev/snd
     environment:
@@ -99,11 +100,15 @@ services:
       # - "pulse"             → route through the host's PipeWire Pulse
       #                        bridge (/run/user/1000/pulse/native). This
       #                        is what we want when the default BT sink is
-      #                        a paired Sonos — pipewire routes us to it.
+      #                        a paired Sonos, once pipewire surfaces it.
+      # - "bluealsa"          → match the libasound2-plugin-bluez PCM that
+      #                        proxies to host bluealsa. This is the runtime
+      #                        path for BT speakers — bluealsa talks A2DP
+      #                        SBC source to the speaker, bypassing pipewire.
       # - "plughw:0,0"        → bypass plugins, force hw:0,0 (reSpeaker jack)
       # - numeric id          → e.g. 0, 6
       # - substring           → e.g. "reSpeaker", "hdmi"
-      SAT_OUTPUT_DEVICE:   "pulse"
+      SAT_OUTPUT_DEVICE:   "bluealsa"
       SAT_DEBUG:          "0"
     restart: unless-stopped
 

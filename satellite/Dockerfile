@@ -5,8 +5,14 @@ FROM python:3.11-slim-bookworm
 # compressed audio we may need. alsa-utils ships `arecord`/`aplay`/`amixer`
 # for repeatable in-container debugging of the device-routing layer (libasound2
 # itself comes in transitively with libportaudio2 — we only add the CLI tools).
+# libasound2-plugin-bluez lets us route the satellite's PCM output through the
+# host's bluealsa service when SAT_OUTPUT_DEVICE=bluealsa. We do NOT pipe
+# audio via /var/run/dbus/system_bus_socket's bluealsa MediaEndpoint1 over
+# DBus from the container — that path requires a system policy file we can't
+# reproduce here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
+        libasound2-plugin-bluez \
         libsndfile1 \
         ffmpeg \
         alsa-utils \
