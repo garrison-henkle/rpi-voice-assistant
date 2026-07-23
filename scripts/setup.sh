@@ -45,7 +45,8 @@ fi
 # loopback and a host-side probe would spin for the full timeout window
 # before failing (fixed in the streaming refactor — see docker-compose.yml).
 wait_for_container_healthy() {
-  local name="$1" max_tries="$2" tries elapsed=0
+  local name="$1" max_tries="$2"
+  local tries=0 elapsed=0
   while (( tries++ < max_tries )); do
     elapsed=$((elapsed + 1))
     local status
