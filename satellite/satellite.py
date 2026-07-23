@@ -205,6 +205,34 @@ def _accepts_speaker_sr(device) -> bool:
 _RESAMPLE_PROBES = ("default", "sysdefault")
 
 
+def _max_speaker_volume(out_dev) -> None:
+    """Max out PCM controls via amixer on the chosen output device.
+
+    The reSpeaker XVF3800 USB Audio gadget ships both PCM,0 (stereo) and
+    PCM,1 (mono) at ~62% / ~67% from the factory; the mono control is
+    independent and `alsactl init` does not raise it along with the
+    stereo one. amixer absent or non-USB output is fine — the call is
+    best-effort and never aborts boot.
+    """
+    if not (isinstance(out_dev, str) and out_dev in {"default", "sysdefault"}):
+        log.debug("skip amixer volume bump for non-default output %r", out_dev)
+        return
+    import shutil
+    import subprocess
+    if shutil.which("amixer") is None:
+        log.debug("amixer not on PATH; skipping volume bump")
+        return
+    for ctl in ("PCM,0", "PCM,1", "PCM"):
+        try:
+            r = subprocess.run(
+                ["amixer", "sset", ctl, "100%"],
+                capture_output=True, text=True, timeout=2,
+            )
+            log.info("amixer sset %s 100%%: rc=%d", ctl, r.returncode)
+        except Exception as e:
+            log.warning("amixer sset %s failed: %s", ctl, e)
+
+
 def pick_input_device() -> object:
     """Return the PortAudio device id (or string) we should open for capture."""
     override, _ = _parse_overrides()
@@ -572,6 +600,17 @@ def main() -> int:
             "PulseAudio socket not mounted at %s/pulse — playback may fall back to ALSA.",
             _env("XDG_RUNTIME_DIR", "/run/user/1000"),
         )
+
+    # The reSpeaker USB Audio gadget ships its PCM playback controls at
+    # ~62% by default and exposes a *separate* mono PCM control (PCM,1)
+    # that store-load doesn't raise along with the stereo one. If we
+    # leave both at the factory defaults the user gets a barely-audible
+    # response even though the playback stream itself opens. Bump both
+    # to 100% via amixer so the satellite speaks at the same loudness
+    # regardless of host config. Failures here are non-fatal — amixer
+    # is not always present (e.g. minimal containers) — so we log warn
+    # and continue instead of aborting boot.
+    _max_speaker_volume(out_dev)
 
     # ---- wake model ----------------------------------------------------- #
     try:
