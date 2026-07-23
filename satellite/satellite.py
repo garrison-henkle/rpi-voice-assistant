@@ -156,7 +156,7 @@ def _parse_overrides() -> tuple[object, object]:
 
 def pick_input_device() -> object:
     """Return the PortAudio device id (or string) we should open for capture."""
-    _, override = _parse_overrides()
+    override, _ = _parse_overrides()
     if override is not None:
         log.info("input device override: %r", override)
         return override
@@ -171,7 +171,7 @@ def pick_input_device() -> object:
 
 
 def pick_output_device() -> object:
-    override, _ = _parse_overrides()
+    _, override = _parse_overrides()
     if override is not None:
         log.info("output device override: %r", override)
         return override
