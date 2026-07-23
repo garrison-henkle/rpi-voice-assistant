@@ -103,10 +103,10 @@ services:
       SAT_WAKE_TH_WORD:     "${SAT_WAKE_TH_WORD:-hey_rhasspy}"
       SAT_WAKE_THRESHOLD:   "${SAT_WAKE_THRESHOLD:-0.5}"
       SAT_SAMPLE_RATE:      "${SAT_SAMPLE_RATE:-16000}"
-      SAT_VAD_RMS_QUIET:    "${SAT_VAD_RMS_QUIET:-150}"
+      SAT_VAD_RMS_QUIET:    "${SAT_VAD_RMS_QUIET:-100}"
       # Number of trailing-silent 80 ms frames before end-of-utterance.
-      # 8 ⇒ 640 ms; lower for snappier turn-taking, higher for quieter speakers.
-      SAT_VAD_QUIET_FRAMES: "${SAT_VAD_QUIET_FRAMES:-8}"
+      # 5 ⇒ 400 ms; lower for snappier turn-taking, higher for quieter speakers.
+      SAT_VAD_QUIET_FRAMES: "${SAT_VAD_QUIET_FRAMES:-5}"
       # Tool-call / chime / prewarm knobs (see .env.example for trade-off).
       SAT_STREAMING_ASR:    "${SAT_STREAMING_ASR:-1}"
       SAT_CHIME_ON_TOOL:    "${SAT_CHIME_ON_TOOL:-1}"

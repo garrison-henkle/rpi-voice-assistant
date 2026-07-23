@@ -55,8 +55,8 @@ WAKE_TH_WORD        = _env("SAT_WAKE_TH_WORD",    "hey_rhasspy")
 WAKE_THRESHOLD      = float(_env("SAT_WAKE_THRESHOLD", "0.5"))
 SAMPLE_RATE         = int(_env("SAT_SAMPLE_RATE",  "16000"))
 CHANNELS            = 1
-VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "150"))
-VAD_QUIET_FRAMES    = int(_env("SAT_VAD_QUIET_FRAMES", "12"))   # 80 ms each
+VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "100"))
+VAD_QUIET_FRAMES    = int(_env("SAT_VAD_QUIET_FRAMES", "5"))    # 80 ms each = 400 ms
 VAD_MAX_FRAMES      = int(_env("SAT_VAD_MAX_FRAMES",   "480"))  # 38 s safety cap
 # 1 (default) → push each captured 80 ms block into moonshine's
 # `add_audio` + `update_transcription` loop while we are still recording,
@@ -429,6 +429,11 @@ _wake_mute_lock = threading.Lock()
 # serialise: if a turn is already in flight, drop the overlapping
 # wake word instead of double-firing the orchestrator.
 _handle_lock = threading.Lock()
+
+# Performance counter for the most recent streaming ASR pass; logged in
+# _handle_utterance_locked so we can spot inference spikes from
+# outside without reading ::stat-blocks.
+_STREAMING_LAST_DURATION_S: float = 0.0
 
 
 def _prewarm_ollama() -> None:
@@ -998,6 +1003,10 @@ def _handle_utterance_locked(
     if SAT_STREAMING_ASR:
         try:
             text_in = streaming_transcribe(transcriber, chunks)
+            log.info(
+                "streaming ASR took %.0fms (chunks=%d)",
+                _STREAMING_LAST_DURATION_S * 1000, len(chunks),
+            )
         except Exception as e:
             log.warning("streaming ASR failed; falling back to offline: %s", e)
             text_in = ""
@@ -1027,24 +1036,40 @@ def streaming_transcribe(
     chunks: list[np.ndarray],
     sr: int = SAMPLE_RATE,
 ) -> str:
-    """Drive moonshine's streaming API over [chunks]; return the latest
-    transcript text or "" if moonshine never reconciles any lines."""
+    """Drive moonshine's streaming API over [chunks] and return the
+    final transcript text.
+
+    Implementation note: moonshine's `update_transcription()` is a
+    full model forward pass — calling it on every 80 ms block spent
+    ~1.7 s on the Pi 5 for an 8 s utterance, dominating wake → chime
+    latency. We batch: feed every block via `add_audio()` and call
+    `update_transcription()` every `UPDATE_EVERY` blocks plus once
+    on the way out. The model still reconciles its partial
+    transcript between the slower checkpoints, so we get a
+    final-but-fast result without losing early guesses.
+    """
+    global _STREAMING_LAST_DURATION_S  # used to log perf for ops
+    t0 = time.monotonic()
     transcriber.start()
     last_text = ""
+    update_every_max = max(1, int(_env("SAT_STREAMING_UPDATE_EVERY", "8")))
+    update_every = min(update_every_max, max(1, len(chunks) // 4))
     try:
-        for block in chunks:
+        for i, block in enumerate(chunks):
             floats = pcm16_to_float32(block)
             transcriber.add_audio(floats.tolist(), sr)
-            res = transcriber.update_transcription()
-            if res and res.lines:
-                joined = " ".join(ln.text for ln in res.lines if ln.text).strip()
-                if joined:
-                    last_text = joined
+            if i % update_every == 0 or i == len(chunks) - 1:
+                res = transcriber.update_transcription()
+                if res and res.lines:
+                    joined = " ".join(ln.text for ln in res.lines if ln.text).strip()
+                    if joined:
+                        last_text = joined
     finally:
         try:
             transcriber.stop()
         except Exception:
             pass
+    _STREAMING_LAST_DURATION_S = time.monotonic() - t0
     return last_text
 
 
