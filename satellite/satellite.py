@@ -572,12 +572,18 @@ class ChunkPlayer:
         except Exception as e:
             log.warning("audio stream close failed: %s", e)
 
-    def feed(self, chunk_int16: np.ndarray) -> None:
-        """Push one int16 chunk to the queue; open the audio device if needed."""
+    def feed(self, chunk_int16: np.ndarray) -> bool:
+        """Push one int16 chunk to the queue; open the audio device if needed.
+
+        Returns True if the chunk was enqueued (or the device is open and
+        had room); False otherwise. The caller can use the return value
+        to decide whether the pre-warm worked.
+        """
         if chunk_int16 is None or chunk_int16.size == 0:
-            return
+            return True
         # Lazily open so a host with no speakers at boot does not crash.
-        self._ensure_open()
+        if not self._ensure_open():
+            return False
         # Extend the wake-word mute window so the reSpeaker mic doesn't
         # interpret its own chime/ack as a fresh wake phrase. We pick a
         # quiet window that grows with the chunk length so a single
@@ -590,6 +596,7 @@ class ChunkPlayer:
             _wake_mute_until = max(_wake_mute_until, time.monotonic() + mute_for_s)
         try:
             self._q.put_nowait(chunk_int16)
+            return True
         except queue.Full:
             try:
                 self._q.get_nowait()
@@ -597,8 +604,10 @@ class ChunkPlayer:
                 pass
             try:
                 self._q.put_nowait(chunk_int16)
+                return True
             except queue.Full:
                 log.warning("playback queue dropping chunk (%d bytes)", chunk_int16.size)
+                return False
 
     def feed_eos(self) -> None:
         self._ensure_open()
@@ -840,8 +849,21 @@ def main() -> int:
     # ---- output audio queue + player ----------------------------------- #
     out_q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=64)
     player = ChunkPlayer(out_q, device=out_dev)
-    # Audio device opens lazily on the first `feed().` so a headless Pi
-    # with no speakers at boot still runs without crashing.
+    # Open the output PCM eagerly at startup, then feed a few hundred ms
+    # of silence so bluealsa keeps the A2DP channel warm. Without this
+    # the very first /chat/stream after boot pays a 3-4 s tax while
+    # bluealsa re-negotiates the BT link — the user hears a quiet gap
+    # between end-of-utterance and the chime. Best-effort: if the
+    # device is unavailable at startup we still recover at the first
+    # real feed() (lazy init lives on).
+    try:
+        if player.feed(np.zeros(int(SPK_SAMPLE_RATE * 0.2), dtype=np.int16)):
+            player.feed_eos()
+            log.info("player prewarmed: bluealsa PCM held open at boot")
+        else:
+            log.info("player prewarm deferred (device not ready yet)")
+    except Exception as e:
+        log.warning("player prewarm failed: %s", e)
 
     try:
         with sd.RawInputStream(
