@@ -24,15 +24,48 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
-# Quick disk check. qwen3:1.7b is ~1.4 GB and moonshine-medium adds
-# ~450 MB on top of the un-modified pull layers; the Ollama volume +
-# container layers live under /var/lib/docker on the Pi's root FS, so an
-# almost-full SD card breaks the pull mid-flight.
+# Pull .env into the shell so the rest of this script can use the same
+# values docker compose interpolates. `set -a` exports every assignment
+# that follows; we re-set each variable explicitly so quoting/defaults are
+# caught if .env is missing any of them.
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+
+# Defaults if the user commented something out in .env.
+RPI_LLM_BASE_MODEL=${RPI_LLM_BASE_MODEL:-qwen3:0.6b}
+RPI_LLM_MODEL=${RPI_LLM_MODEL:-voice-assistant}
+RPI_LLM_NUM_CTX=${RPI_LLM_NUM_CTX:-2048}
+RPI_LLM_NUM_PREDICT=${RPI_LLM_NUM_PREDICT:-256}
+RPI_TTS_VOICE=${RPI_TTS_VOICE:-en_US-hfc_male-medium}
+
+# Quick disk check. Bigger LLM tags (qwen3:4b ≈2.6 GB, qwen3:1.7b ≈1.4 GB)
+# plus moonshine-medium ~450 MB lands well over 4 GB on top of the
+# unmodified Ollama pull layers; the Ollama volume lives under
+# /var/lib/docker on the Pi's root FS, so an almost-full SD card breaks the
+# pull mid-flight.
 free_mb=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
 if [[ -n "$free_mb" && "$free_mb" -lt 5120 ]]; then
-  WARN "/var/lib/docker has only ${free_mb} MB free; need ~5 GB for qwen3:1.7b + moonshine-medium bake"
+  WARN "/var/lib/docker has only ${free_mb} MB free; need ~5 GB for $RPI_LLM_BASE_MODEL + moonshine-medium bake"
   WARN "Free up space or move /var/lib/docker to a bigger volume first"
 fi
+
+# Materialise the per-run Modelfile from the template. We template FROM
+# and PARAMETER lines using simple sed replacements rather than envsubst
+# so the placeholder syntax (__RPI_LLM_BASE_MODEL__ etc.) survives git
+# diffs cleanly.
+generate_modelfile() {
+  local src="$ROOT/models/voice-assistant.template.Modelfile"
+  local dst="$ROOT/models/voice-assistant.Modelfile"
+  sed \
+    -e "s|__RPI_LLM_BASE_MODEL__|$RPI_LLM_BASE_MODEL|g" \
+    -e "s|__RPI_LLM_NUM_CTX__|$RPI_LLM_NUM_CTX|g" \
+    -e "s|__RPI_LLM_NUM_PREDICT__|$RPI_LLM_NUM_PREDICT|g" \
+    "$src" > "$dst"
+  LOG "wrote $dst (FROM $RPI_LLM_BASE_MODEL, ctx=$RPI_LLM_NUM_CTX, max_pred=$RPI_LLM_NUM_PREDICT)"
+}
+
 
 # Wait for a container's `healthcheck` to transition to `healthy`.
 # Polls `docker inspect --format '{{.State.Health.Status}}'` once a second
@@ -82,23 +115,25 @@ wait_for_container_healthy ollama 240
 LOG "2b/7 Waiting for piper healthy (compose healthcheck; max 4 minutes)"
 wait_for_container_healthy piper 240
 
-LOG "3/7  Pulling qwen3:1.7b (≈1.4 GB; progress prints inline)"
+LOG "3/7  Generating Modelfile from template (RPI_LLM_BASE_MODEL=$RPI_LLM_BASE_MODEL)"
+generate_modelfile
+
+LOG "4/7  Pulling $RPI_LLM_BASE_MODEL (≈200 MB–3 GB depending on tag; inline progress)"
 # `-i` only — let ollama print its progress to our stdout. Avoid `-t` so no
 # TTY allocation is attempted (which can cause hard-to-debug exits on Pi over
 # SSH if the upstream session isn't a real PTY).
-docker exec -i ollama ollama pull qwen3:1.7b
+docker exec -i ollama ollama pull "$RPI_LLM_BASE_MODEL"
 
-LOG "4/7  Building 'qwen3-nest-mini' tag from models/qwen3-nest-mini.Modelfile"
+LOG "5/7  Building '$RPI_LLM_MODEL' tag from models/voice-assistant.Modelfile"
 # `ollama create` is idempotent; recreating over a stale tag is fine.
-docker exec -i ollama ollama create qwen3-nest-mini -f /models/qwen3-nest-mini.Modelfile
+docker exec -i ollama ollama create "$RPI_LLM_MODEL" -f /models/voice-assistant.Modelfile
 
-LOG "5/7  Building rpi-assistant and assistant-satellite images"
+LOG "6/7  Building rpi-assistant and assistant-satellite images"
 docker compose build rpi-assistant assistant-satellite
 
-LOG "6/7  Bringing up rpi-assistant + assistant-satellite"
+LOG "7/7  Bringing up rpi-assistant + assistant-satellite"
 docker compose up -d rpi-assistant assistant-satellite
 
-LOG "7/7  Done — status + tail"
 echo
 docker compose ps
 echo

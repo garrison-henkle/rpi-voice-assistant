@@ -14,6 +14,10 @@ dist/
 .env
 .env.local
 .env.*.local
+
+# Materialised Modelfile produced by setup.sh from the .template.Modelfile;
+# the template is the source of truth, not the generated file.
+models/voice-assistant.Modelfile
 models/*.Modelfile.local
 
 # OS / tooling noise

@@ -1,0 +1,23 @@
+# Default voice-assistant model for the rpi-nest-mini stack.
+#
+# The base model is set via env (RPI_LLM_BASE_MODEL in .env); on the Pi
+# setup.sh substitutes it into a copy under /models/voice-assistant.Modelfile
+# so we don't bake any one base model into a checked-in file.
+#
+# Tests at hand-off:
+#   RPI_LLM_BASE_MODEL=qwen3:0.6b     ~700 ms first token, weak tool calls
+#   RPI_LLM_BASE_MODEL=qwen3:1.7b     ~1.8 s first token, decent tool calls
+#   RPI_LLM_BASE_MODEL=qwen3:4b       ~3.0 s first token, reliable tools
+#   RPI_LLM_BASE_MODEL=llama3.2:1b    ~1.2 s first token, mixed tool calls
+#
+# For Koog tool calling (weather, Home Assistant), prefer qwen3:4b.
+# For plain conversation, qwen3:0.6b gives the snappiest replies.
+FROM __RPI_LLM_BASE_MODEL__
+
+# 2048-token context fits the system prompt + a short conversational turn
+# inside the 8 GB Pi's KV budget. Bump to 4096 only if you have memory headroom.
+PARAMETER num_ctx __RPI_LLM_NUM_CTX__
+
+# Voice replies stay 1-3 sentences; 256 tokens is a generous ceiling so
+# TTS never spools a paragraph.
+PARAMETER num_predict __RPI_LLM_NUM_PREDICT__

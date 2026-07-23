@@ -27,6 +27,11 @@ import kotlinx.serialization.json.put
  * `content` empty). It also strips `<think>...</think>` trailers in case
  * ollama falls back to inline reasoning on a long prompt.
  *
+ * Model-agnostic: `think:false` and the `<think>` strip are a no-op for
+ * models that don't support either (llama3.2, mistral, phi, …). The
+ * `tools` field is forwarded when the caller sets it; Koog will patch
+ * this in once function-calling lands upstream.
+ *
  * The streaming contract here is the same that the rest of the app expects:
  * every text token we receive invokes [onDelta] immediately so the
  * orchestrator can run Piper alongside the model output.
@@ -43,14 +48,35 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
     private val chatEndpoint = "$baseUrl/api/chat"
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    suspend fun chat(userText: String, onDelta: suspend (String) -> Unit): String {
+    /**
+     * Stream a reply from the configured ollama model.
+     *
+     * @param userText the user's spoken prompt (already transcribed by
+     *                 moonshine on the satellite side).
+     * @param tools    optional OpenAI-shaped tool schemas; when present the
+     *                 model gets a `tools` array and ollama returns
+     *                 `message.tool_calls` instead of plain text. Leave null
+     *                 for plain conversation.
+     * @param onDelta  invoked for every visible text fragment the model
+     *                 emits; the satellite-side orchestrator uses this to
+     *                 flush Piper slices as they appear.
+     */
+    suspend fun chat(
+        userText: String,
+        tools: List<JsonObject>? = null,
+        onDelta: suspend (String) -> Unit,
+    ): String {
         val body = buildJsonObject {
             put("model", modelId)
             put("stream", true)
             // qwen3 in ollama defaults to thinking mode; force it off so
             // `message.content` actually carries the visible reply rather
-            // than the chain-of-thought.
+            // than the chain-of-thought. No-op for non-thinking models
+            // (llama3.2, mistral, …).
             put("think", false)
+            if (!tools.isNullOrEmpty()) {
+                put("tools", JsonArray(tools))
+            }
             put(
                 "messages",
                 JsonArray(

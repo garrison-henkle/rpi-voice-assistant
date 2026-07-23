@@ -39,7 +39,7 @@ services:
       - ./scripts/piper-start.sh:/usr/local/bin/piper-start.sh:ro
     entrypoint: ["/bin/sh", "/usr/local/bin/piper-start.sh"]
     environment:
-      PIPER_VOICE: en_US-hfc_male-medium
+      PIPER_VOICE: ${PIPER_VOICE:-en_US-hfc_male-medium}
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/info')\""]
       interval: 15s
@@ -65,9 +65,11 @@ services:
     environment:
       RPI_ASSISTANT_HTTP_PORT: "6059"
       RPI_LLM_BASE_URL: "http://ollama:11434"
-      RPI_LLM_MODEL: "qwen3-nest-mini"
+      # The tag ollama created from models/voice-assistant.template.Modelfile.
+      # Driven by .env so a single docker compose up picks up the swap.
+      RPI_LLM_MODEL: "${RPI_LLM_MODEL:-voice-assistant}"
       RPI_TTS_BASE_URL: "http://piper:5000"
-      RPI_TTS_VOICE: "en_US-hfc_male-medium"
+      RPI_TTS_VOICE: "${RPI_TTS_VOICE:-en_US-hfc_male-medium}"
     restart: unless-stopped
 
   assistant-satellite:
@@ -93,37 +95,18 @@ services:
     devices:
       - /dev/snd
     environment:
-      RPI_ASST_BASE_URL:  "http://rpi-assistant:6059"
-      SAT_WAKE_TH_WORD:   "hey_rhasspy"
-      SAT_WAKE_THRESHOLD: "0.5"
-      SAT_SAMPLE_RATE:    "16000"
-      SAT_VAD_RMS_QUIET:  "200"
-      # 8 frames × 80 ms = 640 ms of trailing silence before the satellite
-      # treats the user as done. At 12 (the old default) we sat 960 ms
-      # after the last word waiting for noise that never came, eating
-      # ~320 ms of perceived end-to-end latency. moonshine is robust to
-      # trailing silence so dropping to 8 is safe in practice.
-      SAT_VAD_QUIET_FRAMES: "8"
-      # SAT_OUTPUT_DEVICE picks the playback sink. Empty / "auto" lets the
-      # satellite decide at boot:
-      #   1. Probe bluealsa (BT sink paired + connected?) → use if alive.
-      #   2. Else first 16 kHz stereo output (USB reSpeaker or HDMI).
-      #   3. Else ALSA "default".
-      # This makes the satellite work with both wired speakers and a paired
-      # Sonos without an env-var edit — just pair a Sonos to switch routes.
-      #
-      # You can override the auto-pick with one of:
-      # - "bluealsa"          → force BT path (fails if not alive)
-      # - "pulse"             → force the PipeWire / PulseAudio bridge
-      # - "default" / "alsa"  → force the host's default ALSA PCM
-      # - "plughw:0,0"        → bypass plugins, force hw:0,0 (reSpeaker jack)
-      # - numeric id          → e.g. 0, 6
-      # - substring           → e.g. "reSpeaker", "hdmi"
-      SAT_OUTPUT_DEVICE:   "auto"
-      # MAC of the BT sink (e.g. Sonos) — substituted into /etc/asound.conf
-      # at boot. Set to whatever the Sonos reports in `bluetoothctl devices`.
-      SONOS_BT_MAC:        "74:CA:60:A6:F3:F8"
-      SAT_DEBUG:          "0"
+      RPI_ASST_BASE_URL:    "http://rpi-assistant:6059"
+      SAT_WAKE_TH_WORD:     "${SAT_WAKE_TH_WORD:-hey_rhasspy}"
+      SAT_WAKE_THRESHOLD:   "${SAT_WAKE_THRESHOLD:-0.5}"
+      SAT_SAMPLE_RATE:      "${SAT_SAMPLE_RATE:-16000}"
+      SAT_VAD_RMS_QUIET:    "${SAT_VAD_RMS_QUIET:-200}"
+      # Number of trailing-silent 80 ms frames before end-of-utterance.
+      # 8 ⇒ 640 ms; lower for snappier turn-taking, higher for quieter speakers.
+      SAT_VAD_QUIET_FRAMES: "${SAT_VAD_QUIET_FRAMES:-8}"
+      SAT_OUTPUT_DEVICE:    "${SAT_OUTPUT_DEVICE:-auto}"
+      SAT_INPUT_DEVICE:     "${SAT_INPUT_DEVICE:-}"
+      SONOS_BT_MAC:         "${SONOS_BT_MAC:-74:CA:60:A6:F3:F8}"
+      SAT_DEBUG:            "${SAT_DEBUG:-0}"
     restart: unless-stopped
 
 networks:
