@@ -91,7 +91,19 @@ services:
       SAT_SAMPLE_RATE:    "16000"
       SAT_VAD_RMS_QUIET:  "200"
       SAT_VAD_QUIET_FRAMES: "12"
-      SAT_SPK_DEVICE:     "default"
+      # SAT_OUTPUT_DEVICE controls the playback sink the satellite picks at
+      # boot. The auto-pick prefers the first 16 kHz stereo output the host
+      # exposes (currently the reSpeaker XVF3800's analog output on hw:0,0).
+      #
+      # - "default" / unset  → OS default (ALSA dmixer)
+      # - "pulse"             → route through the host's PipeWire Pulse
+      #                        bridge (/run/user/1000/pulse/native). This
+      #                        is what we want when the default BT sink is
+      #                        a paired Sonos — pipewire routes us to it.
+      # - "plughw:0,0"        → bypass plugins, force hw:0,0 (reSpeaker jack)
+      # - numeric id          → e.g. 0, 6
+      # - substring           → e.g. "reSpeaker", "hdmi"
+      SAT_OUTPUT_DEVICE:   "pulse"
       SAT_DEBUG:          "0"
     restart: unless-stopped
 
