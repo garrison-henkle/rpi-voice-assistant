@@ -613,7 +613,13 @@ def _handle_utterance(
     except Exception as e:
         log.warning("moonshine transcribe failed: %s", e)
         return
-    text_lines = [ln.words for ln in tr.lines if ln.words]
+    if DEBUG:
+        log.debug(
+            "moonshine transcript dump: lines=%d, raw=%s",
+            len(tr.lines),
+            [(ln.text, [w.word if w is not None else None for w in (ln.words or [])]) for ln in tr.lines],
+        )
+    text_lines = [ln.text for ln in tr.lines if ln.text]
     text_in = " ".join(text_lines).strip()
     if not text_in:
         log.info("STT returned empty; will not call orchestrator")
