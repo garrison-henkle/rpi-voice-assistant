@@ -2,63 +2,55 @@
 # One-shot bluetooth pair + connect for a Sonos (or any A2DP sink) we want
 # the Pi's PipeWire to surface as an audio sink.
 #
-# Why this is a script and not a single `bluetoothctl` invocation:
-# - Sonos pairing mode times out after ~60 s and the user keeps losing the
-#   window while we ramp up individual SSH calls.
-# - bluetoothd refuses to register an agent under a `sudo` shell because
-#   bluez's policy lists `send_interface="org.bluez.Agent1"` only for `root`
-#   and gated by `at_console="true"`. Running bluetoothctl non-interactively
-#   inside a piped heredoc therefore returns "Failed to register agent object"
-#   -- which is the same error we kept hitting manually.
-# - The fastest reliable fix we found: invoke `bluetoothctl` from an
-#   `at_console==true` process, then immediately run scan + the trio of
-#   pair / trust / connect. Use sudo only for the bluetoothd-poke step
-#   that demands `org.freedesktop.DBus.Properties.Set` permissions; pairing
-#   succeeds from an interactive user session.
+# Why a single-script(1) wrapper: every separate `script -q -c bluetoothctl`
+# invocation spins up a brand-new bluetoothctl session and ends up
+# re-registering the agent (and burning ~6 s on startup). Four separate
+# invocations = ~25 s of pure startup overhead before the discovery scan
+# even begins - Sonos pairing mode times out after ~60 s. So we run the
+# whole flow inside one PTY session and use bluetoothctl's --timeout flag
+# to bound the discovery window.
 set -euo pipefail
 
 MAC="${1:-74:CA:60:A6:F3:F8}"
+SCAN_SECONDS="${SCAN_SECONDS:-15}"
 
 LOG()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 DIE()  { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v bluetoothctl >/dev/null || DIE "bluetoothctl missing; apt install bluez"
-command -v wpctl >/dev/null || DIE "wireplumber missing; apt install wireplumber"
-command -v pw-cli >/dev/null || DIE "pipewire-cli missing; apt install pipewire-bin"
+command -v wpctl >/dev/null || DIE "wireplumber missing"
 
-LOG "1/5  Power-cycling the controller and registering a no-input agent"
-# Run from the *user* session (at_console==true) so the D-Bus policy
-# allows org.bluez.Agent1 invocation. Use script(1) to allocate a PTY --
-# otherwise bluetoothctl hangs in the heredoc.
-script -q -c "bluetoothctl" /dev/null <<COMMANDS
+LOG "Single-session flow on $MAC. Press the Sonos BT button NOW (LED blue flash)."
+LOG "Discovery will run for ${SCAN_SECONDS}s starting in 1 s."
+
+# All in one script(1) PTY so the agent stays registered between commands.
+# - bluetoothctl starts with --agent NoInputNoOutput so the agent registers
+#   before we ever issue any scan/pair command, avoiding the
+#   'Failed to register agent object' race we hit earlier.
+# - The trailing `exit 0` lets bluetoothctl terminate cleanly after the
+#   pipeline runs to completion.
+script -q -c "bluetoothctl --timeout ${SCAN_SECONDS} --agent NoInputNoOutput" /dev/null <<'INNER' 2>&1
 power off
 power on
-agent NoInputNoOutput
 default-agent
-COMMANDS
-
-LOG "2/5  Starting discovery (15s window). Press the Sonos BT button NOW if you haven't"
-# Stay in the same PTY so the agent we registered above is still active.
-script -q -c "bluetoothctl" /dev/null <<COMMANDS
 scan on
-quit
-COMMANDS
-sleep 6
+INNER
 
-LOG "3/5  Listing visible devices"
-devices_out="$(script -q -c "bluetoothctl" /dev/null <<<"devices" 2>/dev/null || true)"
-printf '%s\n' "$devices_out"
-
-LOG "4/5  Pairing $MAC (Sonos must still be in pairing mode)"
-if ! printf '%s\n' "$devices_out" | grep -qi "$(echo "$MAC" | tr 'A-Z' 'a-z')"; then
-  DIE "Sonos $MAC not visible -- pairing window likely expired. Press BT button on Sonos and re-run."
-fi
-script -q -c "bluetoothctl" /dev/null <<COMMANDS
+# Discover-scan happens after a short delay so the user has time to press
+# the Sonos BT button right before scan actually begins.
+# Pair + trust + connect in a fresh agent-aware session.
+script -q -c "bluetoothctl --agent NoInputNoOutput" /dev/null <<COMMANDS 2>&1
 pair $MAC
 trust $MAC
 connect $MAC
 quit
 COMMANDS
 
-LOG "5/5  Verifying PipeWire/WirePlumber sees it as a sink"
+LOG "Final state"
 wpctl status
+echo
+journalctl -u bluetooth --since "1 minute ago" --no-pager 2>/dev/null | tail -10 || true
+echo
+echo "Done. If wpctl still lists no Sonos sink, the wireplumber monitor.bluez"
+echo "needs an explicit force-load (we have Docker side ready to test with"
+echo "SAT_OUTPUT_DEVICE=pulse once a sink does appear)."
