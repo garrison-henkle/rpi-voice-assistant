@@ -112,6 +112,9 @@ services:
       SAT_CHIME_ON_TOOL:    "${SAT_CHIME_ON_TOOL:-1}"
       SAT_PREWARM:          "${SAT_PREWARM:-1}"
       RPI_LLM_TAGS_URL:     "${RPI_LLM_TAGS_URL:-http://ollama:11434/api/tags}"
+      # Mirror from rpi-assistant so the satellite's preload targets
+      # the same tag the orchestrator will hit on first wake.
+      RPI_LLM_MODEL:        "${RPI_LLM_MODEL:-voice-assistant}"
       RPI_TTS_HEALTH_URL:   "${RPI_TTS_HEALTH_URL:-http://piper:5000/info}"
       SAT_OUTPUT_DEVICE:    "${SAT_OUTPUT_DEVICE:-auto}"
       SAT_INPUT_DEVICE:     "${SAT_INPUT_DEVICE:-}"

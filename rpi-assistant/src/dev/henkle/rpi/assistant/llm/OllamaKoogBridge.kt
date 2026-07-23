@@ -69,10 +69,34 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
      *                 JSON is **not** emitted here — only `content`.
      * @return [ChatResult] with the final text + collected tool calls.
      */
+    /**
+     * Stream a reply from the configured ollama model.
+     *
+     * @param userText the user's spoken prompt (already transcribed by
+     *                 moonshine on the satellite side).
+     * @param tools    optional OpenAI-shaped tool schemas; when present
+     *                 the model gets a `tools` array and ollama returns
+     *                 `message.tool_calls` instead of plain text. Leave
+     *                 null for plain conversation.
+     * @param onDelta  invoked for every visible text fragment the model
+     *                 emits; the satellite-side orchestrator uses this
+     *                 to flush Piper slices as they appear. Tool-call
+     *                 JSON is **not** emitted here — only `content`.
+     * @param onToolCall invoked once per unique tool invocation as
+     *                 soon as it first appears in the stream. Dedup
+     *                 uses `(name, normalized-args)` so even when
+     *                 ollama re-emits the same call with progressively
+     *                 richer arguments across many chunks, this fires
+     *                 exactly once with the final args. Use together
+     *                 with [onDelta] to stop forwarding preamble text
+     *                 through Piper the moment a tool fires.
+     * @return [ChatResult] with the final text + collected tool calls.
+     */
     suspend fun chat(
         userText: String,
         tools: List<JsonObject>? = null,
         onDelta: suspend (String) -> Unit,
+        onToolCall: suspend (ToolCall) -> Unit = {},
     ): ChatResult {
         val body = buildJsonObject {
             put("model", modelId)
@@ -103,6 +127,14 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
 
         val responseText = StringBuilder()
         val responseToolCalls: MutableList<ToolCall> = mutableListOf()
+        // Track tool_calls by `(name, normalized-args-signature)` so that
+        // — even if ollama re-emits the same tool across multiple chunks
+        // (it does this for partial-argument streaming) — we only keep
+        // the latest version of each unique invocation. The signature
+        // key changes as the argument JSON populates, so first-seen wins
+        // the spot and the orchestrator fires `onToolCall` exactly once
+        // per distinct tool, with the final (most-populated) arguments.
+        val seenToolCalls: MutableMap<String, ToolCall> = LinkedHashMap()
         var lastChunk: JsonElement? = null
         withContext(Dispatchers.IO) {
             val response = client.post(chatEndpoint) {
@@ -125,7 +157,8 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
                 lastChunk = chunk
                 val msg = chunk["message"]?.jsonObject ?: continue
 
-                // 1. visible content → emit onDelta
+                // 1. visible content → emit onDelta (always stream tokens as
+                // they appear; callers decide whether to flush to Piper).
                 val content = msg["content"]?.takeIf {
                     it !is JsonNull
                 }?.jsonPrimitive?.content
@@ -140,10 +173,33 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
                     }
                 }
 
-                // 2. tool_calls (only present when tools were passed) → collect
-                collectToolCalls(msg)?.let { responseToolCalls.addAll(it) }
+                // 2. tool_calls → dedup by tool *name* (NOT by args) and fire
+                // onToolCall on first appearance of each unique name.
+                // Ollama streams a single named tool across many chunks
+                // where the argument JSON string grows progressively.
+                // Deduplicating by (name, args) would fire onToolCall
+                // once per chunk as args populate. We instead keep the
+                // latest args for each named tool, and we fire
+                // onToolCall exactly once per name so the orchestrator
+                // can abort piping preamble through Piper — otherwise
+                // the user hears "the lights are on" (the model's
+                // preamble) and then "turning on the kitchen lights"
+                // (the canned ack) back to back.
+                collectToolCalls(msg)?.forEach { call ->
+                    if (seenToolCalls.containsKey(call.name)) {
+                        // Same tool, richer arguments — overwrite the
+                        // payload so the orchestrator sees the final
+                        // args when it dispatches after done.
+                        seenToolCalls[call.name] = call
+                    } else {
+                        seenToolCalls[call.name] = call
+                        onToolCall(call)
+                    }
+                }
+
             }
         }
+        responseToolCalls.addAll(seenToolCalls.values)
         return ChatResult(
             text = responseText.toString(),
             toolCalls = responseToolCalls.toList(),

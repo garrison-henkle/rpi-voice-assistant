@@ -142,7 +142,7 @@ class HttpApi(
                     return@post
                 }
                 log.info("/chat text='{}'", textIn)
-                val responseText = llm.chat(textIn) { /* drop streaming deltas */ }.text
+                val responseText = llm.chat(textIn, onDelta = { /* drop streaming deltas */ }).text
                 log.info("/chat answer='{}'", responseText)
                 val wav = withContext(Dispatchers.IO) { tts.synthesize(responseText) }
                 val body = buildJsonObject {
@@ -213,38 +213,65 @@ class HttpApi(
                     // asks for tool-calling (or always; the satellite
                     // currently always does so we get chime coverage).
                     val toolSchemas: List<JsonObject> = tools.schemas()
-                    val result = llm.chat(textIn, toolSchemas) { delta ->
-                        emit(buildJsonObject {
-                            put("type", "text_delta")
-                            put("text", delta)
-                        })
-                        unfinished.append(delta)
-                        val pending = unfinished.toString()
-                        val boundary = lastSentenceBoundary(pending)
-                        if (boundary > 0) {
-                            val slice = pending.substring(0, boundary + 1).trim()
-                            val remainder = pending.substring(boundary + 1)
-                            unfinished.clear()
-                            unfinished.append(remainder)
-                            // Kick Piper as soon as the LLM emits a complete
-                            // sentence — even a short one. This trims ~300 ms
-                            // off the first-audio latency versus MIN_FLUSH_CHARS=24
-                            // which made piper wait until the *first* sentence
-                            // passed 24 chars regardless of boundary position.
-                            if (slice.isNotBlank()) {
-                                flushSlice(slice, isFinal = false)
+                    val toolFired: java.util.concurrent.atomic.AtomicBoolean =
+                        java.util.concurrent.atomic.AtomicBoolean(false)
+                    val result = llm.chat(
+                        userText = textIn,
+                        tools = toolSchemas,
+                        onDelta = { delta ->
+                            // Once a tool has been requested, stop
+                            // piping preamble text through Piper. The
+                            // canned ack overlaps the model preamble
+                            // and the user would otherwise hear
+                            // "the lights are on" + "turning on the
+                            // kitchen lights" back to back. We keep the
+                            // text_delta wire event flowing so
+                            // downstream UIs still observe the model
+                            // output verbatim.
+                            if (toolFired.get()) return@chat
+                            emit(buildJsonObject {
+                                put("type", "text_delta")
+                                put("text", delta)
+                            })
+                            unfinished.append(delta)
+                            val pending = unfinished.toString()
+                            val boundary = lastSentenceBoundary(pending)
+                            if (boundary > 0) {
+                                val slice = pending.substring(0, boundary + 1).trim()
+                                val remainder = pending.substring(boundary + 1)
+                                unfinished.clear()
+                                unfinished.append(remainder)
+                                // Kick Piper as soon as the LLM emits a complete
+                                // sentence — even a short one. This trims ~300 ms
+                                // off the first-audio latency versus MIN_FLUSH_CHARS=24
+                                // which made piper wait until the *first* sentence
+                                // passed 24 chars regardless of boundary position.
+                                if (slice.isNotBlank()) {
+                                    flushSlice(slice, isFinal = false)
+                                }
+                            } else if (pending.length >= MAX_FLUSH_CHARS) {
+                                flushSlice(pending.trim(), isFinal = false)
+                                unfinished.clear()
                             }
-                        } else if (pending.length >= MAX_FLUSH_CHARS) {
-                            flushSlice(pending.trim(), isFinal = false)
-                            unfinished.clear()
-                        }
-                    }
+                        },
+                        onToolCall = { _ ->
+                            // Mark down here so any further onDelta text
+                            // deltas short-circuit out above. The actual
+                            // dispatch + audio happens in the finalise
+                            // branch below so we don't speak the ack
+                            // while the model is still streaming.
+                            toolFired.set(true)
+                        },
+                    )
                     log.info(
                         "/chat/stream answer='{}' (tool_calls={})",
                         result.text,
                         result.toolCalls.size,
                     )
-                    if (unfinished.isNotEmpty()) {
+                    // Finalise any unfinished preamble **only when the LLM
+                    // did not request a tool** — the preamble and the
+                    // canned ack would be a doubled utterance otherwise.
+                    if (unfinished.isNotEmpty() && result.toolCalls.isEmpty()) {
                         flushSlice(unfinished.toString().trim(), isFinal = true)
                         unfinished.clear()
                     }

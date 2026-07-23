@@ -405,22 +405,47 @@ def _synthesise_chime(
 
 
 def _prewarm_ollama() -> None:
-    """Hit ollama /api/tags so weights load for our model and stay resident.
+    """Force ollama to load the active chat model + keep it resident.
 
-    With OLLAMA_KEEP_ALIVE=30m on the host (configured in docker-compose)
-    the first /api/chat request is hot; this probe collapses the cold
-    load from ~7 s to ~0.4 s on the very first wake. Best-effort —
-    network or ollama-not-yet-ready errors are logged but never abort
-    the satellite's boot.
+    /api/tags only *lists* models — it does not load them. To collapse
+    the cold-load tax on the first wake we POST a 1-token /api/generate
+    request with `keep_alive: "30m"` so the weights stay in RAM for the
+    configured OLLAMA_KEEP_ALIVE duration. Best-effort — network or
+    ollama-not-yet-ready errors are logged but never abort boot.
+
+    Model name resolution: the orchestrator runs ollama with the tag we
+    created from `models/voice-assistant.template.Modelfile`
+    (`voice-assistant` by default). We push to whichever name
+    `RPI_LLM_MODEL` says, falling back to `voice-assistant` so the
+    prewarm hits exactly what the streaming chat endpoint will hit.
     """
     if not SAT_PREWARM:
         return
-    import urllib.request, json as _json
+    import urllib.request, json as _json, os
+    model_name = (os.environ.get("RPI_LLM_MODEL") or "voice-assistant").strip()
+    if not model_name:
+        model_name = "voice-assistant"
+    # The Ollama /api/generate endpoint lives next to /api/chat on the
+    # same host. `tags_url` is e.g. http://ollama:11434/api/tags; we
+    # # strip the suffix and tack on /api/generate.
+    gen_url = OLLAMA_TAGS_URL.rsplit("/", 1)[0] + "/api/generate"
+    body = {
+        "model": model_name,
+        "prompt": "hi",
+        "stream": False,
+        "keep_alive": "30m",
+        "options": {"num_predict": 1, "temperature": 0.0},
+    }
+    req = urllib.request.Request(
+        gen_url,
+        data=_json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=4) as r:
-            body = _json.loads(r.read().decode("utf-8"))
-        names = [m.get("name", "?") for m in body.get("models", [])]
-        log.info("prewarm ollama ok; %d model(s) resident: %s", len(names), names[:5])
+        with urllib.request.urlopen(req, timeout=20) as r:
+            _ = r.read()
+        log.info("prewarm ollama ok; model '%s' loaded and resident", model_name)
     except Exception as e:
         log.warning("prewarm ollama failed (cold-load on first wake expected): %s", e)
 
