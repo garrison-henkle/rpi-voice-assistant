@@ -412,11 +412,13 @@ def _synthesise_chime(
 # fake wake → POST → another chime → repeat. We refresh a 4-s mute
 # window every time the player receives a PCM chunk; once the
 # orchestrator finishes streaming audio the window expires.
-_WAKE_MUTE_AFTER_FEED_S: float = 4.0
+_WAKE_MUTE_AFTER_FEED_S: float = 6.0
 # Extra mute applied when the orchestrator signals end-of-stream
 # (chime + ack all rendered). Sized for the 1–2 s ringing of a Sonos
-# speaker plus the BT codec's lag in returning to silence.
-_WAKE_MUTE_AFTER_EOS_S: float = 3.0
+# speaker plus the BT codec's lag in returning to silence, plus a
+# comfortable cooldown so the user doesn't trip us with their own
+# playback.
+_WAKE_MUTE_AFTER_EOS_S: float = 5.0
 _wake_mute_until: float = 0.0
 _wake_mute_lock = threading.Lock()
 # Moonshine's streaming Transcriber is stateful (start/add/stop over an

@@ -215,6 +215,14 @@ class HttpApi(
                     val toolSchemas: List<JsonObject> = tools.schemas()
                     val toolFired: java.util.concurrent.atomic.AtomicBoolean =
                         java.util.concurrent.atomic.AtomicBoolean(false)
+                    // Right when we *know* the model has heard the
+                    // request (after STT on the satellite side) and are
+                    // actively thinking / streaming, fire the chime so
+                    // the user hears something in the gap before
+                    // Piper's reply starts. This is the "I heard
+                    // something" signal the user expects, not a
+                    // post-reply flourish.
+                    emit(buildJsonObject { put("type", "chime") })
                     val result = llm.chat(
                         userText = textIn,
                         tools = toolSchemas,
@@ -279,12 +287,12 @@ class HttpApi(
                     // Tool-call fast path. The LLM emitted `message.tool_calls`
                     // (ChimeraSynth/qwen3-think fill `content` empty in that
                     // case) so the satellite heard nothing between sentence
-                    // boundaries and tool execution. Cover the gap with a
-                    // chime and dispatch tools synchronously without
-                    // round-tripping to the LLM for an acknowledgement.
+                    // boundaries and tool execution. Chime has already been
+                    // emitted up-front as the "I heard something" signal;
+                    // here we just dispatch tools and stream the canned
+                    // ack straight to piper (no second LLM round-trip).
                     if (result.toolCalls.isNotEmpty() && skipToolAckLlm) {
                         log.info("tool-call fast path: {} call(s)", result.toolCalls.size)
-                        emit(buildJsonObject { put("type", "chime") })
                         for (call in result.toolCalls) {
                             log.info("executing tool {} args={}", call.name, call.arguments)
                             try {
