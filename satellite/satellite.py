@@ -428,7 +428,7 @@ def _prewarm_ollama() -> None:
     # The Ollama /api/generate endpoint lives next to /api/chat on the
     # same host. `tags_url` is e.g. http://ollama:11434/api/tags; we
     # # strip the suffix and tack on /api/generate.
-    gen_url = OLLAMA_TAGS_URL.rsplit("/", 1)[0] + "/api/generate"
+    gen_url = OLLAMA_TAGS_URL.removesuffix("/api/tags").removesuffix("/") + "/api/generate"
     body = {
         "model": model_name,
         "prompt": "hi",
