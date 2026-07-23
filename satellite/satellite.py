@@ -180,6 +180,34 @@ def _bluealsa_alive() -> bool:
         return False
 
 
+def _accepts_speaker_sr(device) -> bool:
+    """Probe whether ``device`` accepts the speaker sample rate we need.
+
+    Falls back to a host-API plug wrapper (``plug:<id>``, ``plughw:<id>``,
+    ``default``) when the picked device itself is a raw ``hw:`` PCM that
+    doesn't enumerate the rate Piper emits. Plug sample-rate conversion is
+    transparent to the user; volume and routing are unchanged.
+    """
+    sr = SPK_SAMPLE_RATE
+    candidates: list[object] = [device]
+    if isinstance(device, int):
+        candidates.extend([f"plug:{device}", "default", "plug:default"])
+    elif isinstance(device, str):
+        if device.startswith(("plughw:", "plug:")):
+            pass
+        else:
+            candidates.extend([f"plug:{device}", "default", "plug:default"])
+        if device.startswith("hw:"):
+            candidates.append("plughw:" + device[len("hw:"):])
+    for c in candidates:
+        try:
+            sd.check_output_settings(device=c, samplerate=sr, channels=1, dtype="int16")
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def pick_input_device() -> object:
     """Return the PortAudio device id (or string) we should open for capture."""
     override, _ = _parse_overrides()
@@ -205,16 +233,49 @@ def pick_output_device() -> object:
     # Smart auto: prefer BT (bluealsa) when a sink is paired on the host
     # so that moving the satellite to a wired speaker only requires turning
     # BT off — no env var edit. We probe bluealsa first; on failure we fall
-    # back to the first 16 kHz stereo device (typically the reSpeaker /
-    # USB audio gadget) and only then to the ALSA "default" placeholder.
+    # back to the first device that accepts the Piper output SR via a
+    # plug wrapper (resampling transparently), and only then to the raw
+    # 16-kHz-capable id when nothing else works.
     if _bluealsa_alive():
-        log.info("auto-picked output device: 'bluealsa' (BT sink alive)")
-        return "bluealsa"
+        # Verify bluealsa accepts our Piper rate. With our container's plug
+        # this always does, but other hosts (e.g. bluealsa-alsa-bridge on
+        # a flat /etc/asound.conf) may not.
+        if _accepts_speaker_sr("bluealsa"):
+            log.info("auto-picked output device: 'bluealsa' (BT sink alive)")
+            return "bluealsa"
+        log.info("bluealsa probe OK but it rejects SR=%d; looking elsewhere",
+                 SPK_SAMPLE_RATE)
     log.info("bluealsa unavailable; falling back to first 16 kHz stereo device")
     table = _device_table()
+    # First pass: prefer plug-wrapped virtual PCMs (front, default, …) so
+    # ALSA converts 22050 -> 48000 transparently. These always work
+    # regardless of the device's native rate.
+    plug_names = ("front", "surround40", "surround51", "surround71",
+                  "iec958", "spdif", "dmix")
     for d in table:
         if d["out"] > 0 and d["sr16k_ok"]:
-            log.info("auto-picked output device id=%d %r", d["id"], d["name"])
+            if any(p in d["name"] for p in plug_names) or d["name"] in plug_names:
+                wrapped = f"plug:{d['id']}"
+                if _accepts_speaker_sr(wrapped):
+                    log.info("auto-picked output device %r (plug wrapper over id=%d %r)",
+                             wrapped, d["id"], d["name"])
+                    return wrapped
+    # Second pass: probe every candidate with the actual Piper rate via the
+    # plug wrapper; pick the first that accepts. This is what made 22050
+    # playback start working on reSpeaker, which only natively does 48k.
+    for d in table:
+        if d["out"] > 0 and d["sr16k_ok"]:
+            wrapped = f"plug:{d['id']}"
+            if _accepts_speaker_sr(wrapped):
+                log.info("auto-picked output device %r (plug wrapper over id=%d %r)",
+                         wrapped, d["id"], d["name"])
+                return wrapped
+    # Last resort: accept raw hw and pray ALSA converts.
+    for d in table:
+        if d["out"] > 0 and d["sr16k_ok"]:
+            log.warning("no device accepted SR=%d plug; falling back to id=%d %r "
+                        "(playback may refuse to start)",
+                        SPK_SAMPLE_RATE, d["id"], d["name"])
             return d["id"]
     log.warning("no 16 kHz output device visible; falling back to 'default'")
     return "default"
@@ -468,9 +529,24 @@ def stream_chat(
                     if not b64:
                         continue
                     wav = base64.b64decode(b64)
-                    pcm = strip_wav_header(wav) if not first_audio else wav
-                    first_audio = False
-                    arr, _sr = wav_to_pcm(pcm)  # already int16 mono
+                    if first_audio:
+                        # The orchestrator's first audio chunk keeps its 44-byte
+                        # RIFF/WAVE header so we can parse the sample rate /
+                        # channel layout; every subsequent slice ships raw
+                        # 16-bit mono PCM already header-stripped server-side.
+                        arr, _sr = wav_to_pcm(wav)
+                        first_audio = False
+                    else:
+                        # Strip a stray RIFF header defensively in case a server
+                        # change reverts to per-chunk WAVs, then interpret the
+                        # rest as raw int16 PCM.
+                        body = strip_wav_header(wav)
+                        if len(body) % 2:
+                            log.warning("odd byte count in PCM chunk (%d); trimming", len(body))
+                            body = body[:-1]
+                        arr = np.frombuffer(body, dtype=np.int16)
+                        if arr.size == 0:
+                            continue
                     player.feed(arr)
                 elif kind == "done":
                     break
