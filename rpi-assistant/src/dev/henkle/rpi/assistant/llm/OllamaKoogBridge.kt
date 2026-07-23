@@ -11,30 +11,29 @@ import io.ktor.http.contentType
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * Streams a chat reply from a local Ollama-served LLM. Implements just the
- * pieces we need from ollama's /api/chat wire format and bypasses Koog's
+ * Streams a chat reply from a local Ollama-served LLM. Bypasses Koog's
  * `OllamaClient` because Koog never passes `think:false` and qwen3 defaults
  * to thinking mode (which silently fills the `thinking` field while leaving
  * `content` empty). It also strips `<think>...</think>` trailers in case
  * ollama falls back to inline reasoning on a long prompt.
  *
  * Model-agnostic: `think:false` and the `<think>` strip are a no-op for
- * models that don't support either (llama3.2, mistral, phi, …). The
- * `tools` field is forwarded when the caller sets it; Koog will patch
- * this in once function-calling lands upstream.
- *
- * The streaming contract here is the same that the rest of the app expects:
- * every text token we receive invokes [onDelta] immediately so the
- * orchestrator can run Piper alongside the model output.
+ * models that don't support either (llama3.2, mistral, phi, …). When
+ * [chat] is called with [tools], ollama's response may include
+ * `message.tool_calls` JSON; we surface those so the orchestrator can
+ * route them to a `ToolExecutor` and decide whether to speak the result
+ * or chain a follow-up LLM call.
  */
 class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
     private val client = HttpClient(CIO) {
@@ -46,33 +45,41 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
     }
     private val modelId = modelId
     private val chatEndpoint = "$baseUrl/api/chat"
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val json = kotlinx.serialization.json.Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
+    private val systemPrompt = "You are a voice assistant named Rhasspy. " +
+        "Reply in 1-3 short, conversational sentences. " +
+        "No markdown, no lists, no code blocks. If you do not " +
+        "know the answer, say so plainly; do not invent."
 
     /**
      * Stream a reply from the configured ollama model.
      *
      * @param userText the user's spoken prompt (already transcribed by
      *                 moonshine on the satellite side).
-     * @param tools    optional OpenAI-shaped tool schemas; when present the
-     *                 model gets a `tools` array and ollama returns
-     *                 `message.tool_calls` instead of plain text. Leave null
-     *                 for plain conversation.
+     * @param tools    optional OpenAI-shaped tool schemas; when present
+     *                 the model gets a `tools` array and ollama returns
+     *                 `message.tool_calls` instead of plain text. Leave
+     *                 null for plain conversation.
      * @param onDelta  invoked for every visible text fragment the model
-     *                 emits; the satellite-side orchestrator uses this to
-     *                 flush Piper slices as they appear.
+     *                 emits; the satellite-side orchestrator uses this
+     *                 to flush Piper slices as they appear. Tool-call
+     *                 JSON is **not** emitted here — only `content`.
+     * @return [ChatResult] with the final text + collected tool calls.
      */
     suspend fun chat(
         userText: String,
         tools: List<JsonObject>? = null,
         onDelta: suspend (String) -> Unit,
-    ): String {
+    ): ChatResult {
         val body = buildJsonObject {
             put("model", modelId)
             put("stream", true)
             // qwen3 in ollama defaults to thinking mode; force it off so
             // `message.content` actually carries the visible reply rather
-            // than the chain-of-thought. No-op for non-thinking models
-            // (llama3.2, mistral, …).
+            // than the chain-of-thought. No-op for non-thinking models.
             put("think", false)
             if (!tools.isNullOrEmpty()) {
                 put("tools", JsonArray(tools))
@@ -83,21 +90,20 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
                     listOf(
                         buildJsonObject {
                             put("role", "system")
-                            put(
-                                "content",
-                                "You are a voice assistant named Rhasspy. " +
-                                    "Reply in 1-3 short, conversational sentences. " +
-                                    "No markdown, no lists, no code blocks. If you do not " +
-                                    "know the answer, say so plainly; do not invent."
-                            )
+                            put("content", systemPrompt)
                         },
-                        buildJsonObject { put("role", "user"); put("content", userText) },
+                        buildJsonObject {
+                            put("role", "user")
+                            put("content", userText)
+                        },
                     )
-                )
+                ),
             )
         }
 
         val responseText = StringBuilder()
+        val responseToolCalls: MutableList<ToolCall> = mutableListOf()
+        var lastChunk: JsonElement? = null
         withContext(Dispatchers.IO) {
             val response = client.post(chatEndpoint) {
                 contentType(ContentType.Application.Json)
@@ -116,33 +122,69 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
                 } catch (e: Exception) {
                     continue
                 }
-                // For thinking-mode fallback: ollama emits the model output in
-                // `message.content` AND the model's own reasoning in
-                // `message.thinking`. With think=false above, both stay
-                // empty for thinking; only `message.content` carries tokens.
+                lastChunk = chunk
                 val msg = chunk["message"]?.jsonObject ?: continue
-                val content = msg["content"]?.takeIf {
-                    it !is kotlinx.serialization.json.JsonNull
-                }?.jsonPrimitive?.content ?: continue
 
-                // Belt-and-braces: some configs of qwen3 hybrid-mode still
-                // emit `<think>...</think>` inside `content`. Strip those
-                // even though they shouldn't be there when think=false.
-                if (content.contains("<think>")) {
-                    pendingBuffer.append(stripThinking(content))
-                } else {
-                    pendingBuffer.append(content)
+                // 1. visible content → emit onDelta
+                val content = msg["content"]?.takeIf {
+                    it !is JsonNull
+                }?.jsonPrimitive?.content
+                if (content != null) {
+                    val emitted = if (content.contains("<think>")) stripThinking(content) else content
+                    if (emitted.isNotEmpty()) {
+                        pendingBuffer.append(emitted)
+                        val toEmit = pendingBuffer.toString()
+                        pendingBuffer.clear()
+                        responseText.append(toEmit)
+                        onDelta(toEmit)
+                    }
                 }
-                if (pendingBuffer.isNotEmpty()) {
-                    val toEmit = pendingBuffer.toString()
-                    pendingBuffer.clear()
-                    responseText.append(toEmit)
-                    onDelta(toEmit)
-                }
+
+                // 2. tool_calls (only present when tools were passed) → collect
+                collectToolCalls(msg)?.let { responseToolCalls.addAll(it) }
             }
         }
-        return responseText.toString()
+        return ChatResult(
+            text = responseText.toString(),
+            toolCalls = responseToolCalls.toList(),
+            raw = lastChunk,
+        )
     }
+
+    /**
+     * Extract a flat list of `ToolCall` from a single ollama stream
+     * chunk's `message.tool_calls`. Ollama emits the schema as
+     * `[{function:{name, arguments}}, ...]`; we accept both `arguments`
+     * as a JSON object (typical) and as a stringified JSON (some
+     * adapters), parsing the latter defensively.
+     */
+    private fun collectToolCalls(msg: JsonObject): List<ToolCall>? {
+        val calls = msg["tool_calls"] ?: return null
+        val arr = calls as? JsonArray ?: return null
+        if (arr.isEmpty()) return null
+        return arr.mapNotNull { el ->
+            val obj = el as? JsonObject ?: return@mapNotNull null
+            val fn = obj["function"]?.jsonObject ?: return@mapNotNull null
+            val name = fn["name"]?.jsonPrimitive?.contentOrNullSafe() ?: return@mapNotNull null
+            val rawArgs = fn["arguments"] ?: return@mapNotNull null
+            val argsObj: JsonObject = when (rawArgs) {
+                is JsonObject -> rawArgs
+                is JsonPrimitive ->
+                    parseJsonObjString(rawArgs.content) ?: JsonObject(emptyMap())
+                else -> JsonObject(emptyMap())
+            }
+            ToolCall(name = name, arguments = argsObj)
+        }
+    }
+
+    private fun parseJsonObjString(s: String): JsonObject? = try {
+        json.parseToJsonElement(s).jsonObject
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun JsonElement.contentOrNullSafe(): String? =
+        if (this is JsonPrimitive) content else null
 
     override fun close() = client.close()
 

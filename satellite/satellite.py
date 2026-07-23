@@ -58,6 +58,24 @@ CHANNELS            = 1
 VAD_RMS_QUIET       = int(_env("SAT_VAD_RMS_QUIET",   "200"))
 VAD_QUIET_FRAMES    = int(_env("SAT_VAD_QUIET_FRAMES", "12"))   # 80 ms each
 VAD_MAX_FRAMES      = int(_env("SAT_VAD_MAX_FRAMES",   "1250"))  # 100 s safety cap
+# 1 (default) → push each captured 80 ms block into moonshine's
+# `add_audio` + `update_transcription` loop while we are still recording,
+# so by the time VAD fires the transcript is already final. 0 → keep the
+# old offline `transcribe_without_streaming` path (useful when the
+# MEDIUM_STREAMING model drifts on streamed audio for the user's accent).
+SAT_STREAMING_ASR    = _env("SAT_STREAMING_ASR", "1") == "1"
+# 1 → emit a local-arpeggio chime when /chat/stream reports a
+# tool execution, replacing the empty `content` the LLM sometimes emits
+# before the tool returns. 0 → no chime.
+SAT_CHIME_ON_TOOL    = _env("SAT_CHIME_ON_TOOL", "1") == "1"
+# 1 → run a small startup probe against ollama + piper to load weights
+# and voice synth, so the first wake word doesn't pay a cold-load tax.
+# 0 → skip pre-warm (useful if you're already pre-loading from systemd).
+SAT_PREWARM          = _env("SAT_PREWARM",       "1") == "1"
+# Probe URLs used by pre-warm. Defaults assume the docker bridge name
+# from docker-compose.yml; sat-side overrides are mainly for ad-hoc tests.
+OLLAMA_TAGS_URL      = _env("RPI_LLM_TAGS_URL",  "http://ollama:11434/api/tags")
+PIPER_HEALTH_URL     = _env("RPI_TTS_HEALTH_URL", "http://piper:5000/info")
 SPK_DEVICE          = _env("SAT_SPK_DEVICE", "default")
 INPUT_DEVICE_RAW    = _env("SAT_INPUT_DEVICE", "")           # "" → auto-pick
 OUTPUT_DEVICE_RAW   = _env("SAT_OUTPUT_DEVICE", "")          # "" → auto-pick
@@ -347,6 +365,82 @@ def rms_level(block_int16: np.ndarray) -> float:
     return float(np.sqrt(np.mean(f * f)))
 
 
+# ---------------------------------------------------------------------------
+# Tool-acknowledgement chime + boot pre-warm
+# ---------------------------------------------------------------------------
+# When the orchestrator decides to call a tool, qwen3 often leaves
+# `message.content` empty so the user hears nothing alive until the tool
+# result comes back. We synthesise a soft ascending arpeggio at boot and
+# queue it onto the player queue the moment `{"type":"chime"}` arrives
+# in the NDJSON stream. The cue is short (~480 ms), full-amplitude but
+# ducked to -7 dB, so it doesn't fight the spoken ack that follows.
+
+_CHIME_NOTES_HZ = (523.25, 659.25, 783.99)   # C5, E5, G5
+
+
+def _synthesise_chime(
+    note_ms: int = 80,
+    sr: int = SPK_SAMPLE_RATE,
+    peak: float = 0.45,
+) -> np.ndarray:
+    """Render the arpeggio to a single int16 PCM chunk.
+
+    Each note has 5 ms fade in / fade out to kill the click; 5 ms gap
+    between notes keeps the rhythm breathy rather than mechanical.
+    """
+    note_n = int(sr * note_ms / 1000)
+    fade = max(2, int(sr * 0.005))
+    pieces: list[np.ndarray] = []
+    for hz in _CHIME_NOTES_HZ:
+        t = np.arange(note_n, dtype=np.float32) / sr
+        wave = np.sin(2 * np.pi * hz * t).astype(np.float32)
+        env = np.ones(note_n, dtype=np.float32)
+        env[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        env[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+        pieces.append((wave * env * peak))
+        # 5 ms silence between notes
+        pieces.append(np.zeros(int(sr * 0.005), dtype=np.float32))
+    pcm = np.concatenate(pieces).clip(-1.0, 1.0)
+    return (pcm * 32767).astype(np.int16)
+
+
+def _prewarm_ollama() -> None:
+    """Hit ollama /api/tags so weights load for our model and stay resident.
+
+    With OLLAMA_KEEP_ALIVE=30m on the host (configured in docker-compose)
+    the first /api/chat request is hot; this probe collapses the cold
+    load from ~7 s to ~0.4 s on the very first wake. Best-effort —
+    network or ollama-not-yet-ready errors are logged but never abort
+    the satellite's boot.
+    """
+    if not SAT_PREWARM:
+        return
+    import urllib.request, json as _json
+    try:
+        with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=4) as r:
+            body = _json.loads(r.read().decode("utf-8"))
+        names = [m.get("name", "?") for m in body.get("models", [])]
+        log.info("prewarm ollama ok; %d model(s) resident: %s", len(names), names[:5])
+    except Exception as e:
+        log.warning("prewarm ollama failed (cold-load on first wake expected): %s", e)
+
+
+def _prewarm_piper() -> None:
+    """Hit piper /info and a no-op synth (if exposed) so the WAV synth path
+    is hot. Same best-effort policy as the ollama pre-warm."""
+    if not SAT_PREWARM:
+        return
+    import urllib.request, json as _json
+    try:
+        with urllib.request.urlopen(PIPER_HEALTH_URL, timeout=4) as r:
+            body = _json.loads(r.read().decode("utf-8"))
+        engine = body.get("engine", "?")
+        voice = body.get("voice", "?")
+        log.info("prewarm piper ok; engine=%s voice=%s", engine, voice)
+    except Exception as e:
+        log.warning("prewarm piper failed (cold-synth on first reply expected): %s", e)
+
+
 # --------------------------------------------------------------------------- #
 # Output playback                                                             #
 # --------------------------------------------------------------------------- #
@@ -497,6 +591,26 @@ def _load_moonshine() -> tuple[Transcriber, ModelArch]:
 
 
 # --------------------------------------------------------------------------- #
+# Chime cache (process-wide)                                                  #
+# --------------------------------------------------------------------------- #
+# Rendered lazily on first use; once cached it's a static array reused on
+# every tool_call chime. Keeps the SD queue push O(1) regardless of how
+# many tools fire per session.
+_CHIME_PCM: Optional[np.ndarray] = None
+
+
+def get_chime_pcm() -> np.ndarray:
+    global _CHIME_PCM
+    if _CHIME_PCM is None:
+        _CHIME_PCM = _synthesise_chime()
+        log.info(
+            "chime cache built: %.0f samples (%.0f ms @ %d Hz)",
+            _CHIME_PCM.size, _CHIME_PCM.size / SPK_SAMPLE_RATE * 1000, SPK_SAMPLE_RATE,
+        )
+    return _CHIME_PCM
+
+
+# --------------------------------------------------------------------------- #
 # Streaming chat — chunked HTTP from /chat/stream                              #
 # --------------------------------------------------------------------------- #
 def stream_chat(
@@ -504,26 +618,29 @@ def stream_chat(
     transcriber: Transcriber,
     player: ChunkPlayer,
     q: "queue.Queue[Optional[np.ndarray]]",
+    tools: Optional[list] = None,
 ) -> None:
     """POST text to /chat/stream, draining NDJSON into player + transcriber.
 
     On `{"type":"text_delta",...}` we accumulate incrementally.
     On `{"type":"audio_delta",...}` we decode base64 + strip the WAV
     header (after the very first chunk) and queue the int16 PCM.
+    On `{"type":"chime",...}` we queue the rendered arpeggio so the user
+      hears something alive during the tool-execution window.
     On `{"type":"done"}` we finalize.
-    We also send the first chunk back into the transcriber as a
-    "ghost transcript" forward through any audio resync logic (left as a
-    TODO if/when echo cancellation arrives).
     """
     try:
         url = f"{ASST_BASE_URL}/chat/stream"
         log.info("USER: %s (POST %s)", text_in, url)
         text_buf: list[str] = []
         first_audio = True
+        payload: dict = {"text": text_in}
+        if tools:
+            payload["tools"] = tools
         with requests.post(
             url,
             headers={"Content-Type": "application/json"},
-            data=json.dumps({"text": text_in}),
+            data=json.dumps(payload),
             timeout=POST_TIMEOUT_S,
             stream=True,
         ) as r:
@@ -563,6 +680,12 @@ def stream_chat(
                         if arr.size == 0:
                             continue
                     player.feed(arr)
+                elif kind == "chime":
+                    if not SAT_CHIME_ON_TOOL:
+                        log.debug("chime suppressed by SAT_CHIME_ON_TOOL=0")
+                        continue
+                    log.info("CHIME — orchestrator signalled tool ack")
+                    player.feed(get_chime_pcm())
                 elif kind == "done":
                     break
                 elif kind == "error":
@@ -628,6 +751,18 @@ def main() -> int:
     # ---- moonshine ------------------------------------------------------ #
     transcriber = _load_moonshine()[0]
 
+    # ---- boot pre-warm + chime cache ----------------------------------- #
+    # Render the arpeggio once so the first tool ack doesn't pay the
+    # ~5 ms synth cost. The pre-warm probes are best-effort; failures
+    # just mean a cold-load latency on the first wake of a freshly
+    # rebooted Pi, not a fatal error.
+    try:
+        get_chime_pcm()  # populates _CHIME_PCM and logs its size
+    except Exception as e:
+        log.warning("chime render failed: %s", e)
+    _prewarm_ollama()
+    _prewarm_piper()
+
     # ---- output audio queue + player ----------------------------------- #
     out_q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(maxsize=64)
     player = ChunkPlayer(out_q, device=out_dev)
@@ -678,12 +813,16 @@ def main() -> int:
                             len(rec_buffer),
                             silence_count,
                         )
-                        captured = np.concatenate(rec_buffer) if rec_buffer else np.zeros(0, dtype=np.int16)
+                        # Snapshot the captured blocks for the worker thread
+                        # BEFORE we reset the live buffer; the worker may
+                        # still be reading while the main loop already
+                        # appended new wake-word frames.
+                        captured_chunks: list[np.ndarray] = rec_buffer
                         rec_buffer = []
                         state = "idle"
                         threading.Thread(
                             target=_handle_utterance,
-                            args=(captured, transcriber, out_q, player),
+                            args=(captured_chunks, transcriber, out_q, player),
                             daemon=True,
                         ).start()
 
@@ -701,32 +840,97 @@ def main() -> int:
 
 
 def _handle_utterance(
-    pcm: np.ndarray,
+    chunks: list[np.ndarray],
     transcriber: Transcriber,
     out_q: "queue.Queue[Optional[np.ndarray]]",
     player: ChunkPlayer,
 ) -> None:
-    if pcm.size < int(SAMPLE_RATE * 0.3):
-        log.info("utterance too short — discard")
+    """Run ASR + chat for one captured utterance.
+
+    [chunks] is the live list of 80 ms int16 frames captured between
+    wake-detection and end-of-utterance. When SAT_STREAMING_ASR is on
+    (default), we push those frames into moonshine incrementally so the
+    transcript is already settled by the time we're called here; this
+    shaves ~300 ms off the end-to-end latency vs the batch
+    `transcribe_without_streaming` path. With streaming off, we
+    concatenate into one PCM array before feeding the offline transcribe.
+    """
+    if not chunks:
+        log.info("utterance empty — discard")
         return
-    floats = pcm16_to_float32(pcm)
+    captured = np.concatenate(chunks)
+    if captured.size < int(SAMPLE_RATE * 0.3):
+        log.info("utterance too short (%d samples) — discard", captured.size)
+        return
+
+    text_in: str = ""
+    if SAT_STREAMING_ASR:
+        try:
+            text_in = streaming_transcribe(transcriber, chunks)
+        except Exception as e:
+            log.warning("streaming ASR failed; falling back to offline: %s", e)
+            text_in = ""
+        if not text_in:
+            # Streaming gave nothing back (rare with the medium-streaming
+            # model on a very short turn); try the offline path so the
+            # user does not silently lose their request.
+            log.info("no streaming transcript — re-running offline")
+            floats = pcm16_to_float32(captured)
+            try:
+                text_in = offline_transcribe(transcriber, floats)
+            except Exception as e:
+                log.warning("offline ASR fallback failed: %s", e)
+                return
+    else:
+        floats = pcm16_to_float32(captured)
+        text_in = offline_transcribe(transcriber, floats)
+
+    if not text_in:
+        log.info("STT returned empty; will not call orchestrator")
+        return
+    stream_chat(text_in, transcriber, player, out_q)
+
+
+def streaming_transcribe(
+    transcriber: Transcriber,
+    chunks: list[np.ndarray],
+    sr: int = SAMPLE_RATE,
+) -> str:
+    """Drive moonshine's streaming API over [chunks]; return the latest
+    transcript text or "" if moonshine never reconciles any lines."""
+    transcriber.start()
+    last_text = ""
     try:
-        tr = transcriber.transcribe_without_streaming(floats.tolist(), SAMPLE_RATE)
-    except Exception as e:
-        log.warning("moonshine transcribe failed: %s", e)
-        return
+        for block in chunks:
+            floats = pcm16_to_float32(block)
+            transcriber.add_audio(floats.tolist(), sr)
+            res = transcriber.update_transcription()
+            if res and res.lines:
+                joined = " ".join(ln.text for ln in res.lines if ln.text).strip()
+                if joined:
+                    last_text = joined
+    finally:
+        try:
+            transcriber.stop()
+        except Exception:
+            pass
+    return last_text
+
+
+def offline_transcribe(
+    transcriber: Transcriber,
+    floats: np.ndarray,
+    sr: int = SAMPLE_RATE,
+) -> str:
+    """One-shot transcription (the original path)."""
+    tr = transcriber.transcribe_without_streaming(floats.tolist(), sr)
     if DEBUG:
         log.debug(
             "moonshine transcript dump: lines=%d, raw=%s",
             len(tr.lines),
             [(ln.text, [w.word if w is not None else None for w in (ln.words or [])]) for ln in tr.lines],
         )
-    text_lines = [ln.text for ln in tr.lines if ln.text]
-    text_in = " ".join(text_lines).strip()
-    if not text_in:
-        log.info("STT returned empty; will not call orchestrator")
-        return
-    stream_chat(text_in, transcriber, player, out_q)
+    return " ".join(ln.text for ln in tr.lines if ln.text).strip()
 
 
 if __name__ == "__main__":

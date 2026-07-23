@@ -1,6 +1,8 @@
 package dev.henkle.rpi.assistant.api
 
 import dev.henkle.rpi.assistant.llm.OllamaKoogBridge
+import dev.henkle.rpi.assistant.tools.StubToolExecutor
+import dev.henkle.rpi.assistant.tools.ToolExecutor
 import dev.henkle.rpi.assistant.tts.PiperTtsHttp
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -58,6 +60,18 @@ class HttpApi(
     private val llm: OllamaKoogBridge,
     private val tts: PiperTtsHttp,
     private val log: Logger,
+    /**
+     * Tells the LLM about tool schemas and dispatches any tool_calls the
+     * model emits to an executor. Default to [StubToolExecutor] so the
+     * orchestrator can be wired up without Koog.
+     */
+    private val tools: ToolExecutor = StubToolExecutor(),
+    /**
+     * When the model emits tool_calls, run them and stream the canned ack
+     * straight to piper — skip the second LLM round-trip entirely. Disable
+     * for chain-of-thought debugging.
+     */
+    private val skipToolAckLlm: Boolean = (System.getenv("RPI_LLM_SKIP_POST_TOOL_RESP") ?: "1") == "1",
 ) {
     private val server = embeddedServer(Netty, port = port) {
         configureModule()
@@ -128,7 +142,7 @@ class HttpApi(
                     return@post
                 }
                 log.info("/chat text='{}'", textIn)
-                val responseText = llm.chat(textIn) { /* drop streaming deltas */ }
+                val responseText = llm.chat(textIn) { /* drop streaming deltas */ }.text
                 log.info("/chat answer='{}'", responseText)
                 val wav = withContext(Dispatchers.IO) { tts.synthesize(responseText) }
                 val body = buildJsonObject {
@@ -195,7 +209,11 @@ class HttpApi(
                         return true
                     }
 
-                    val response = llm.chat(textIn) { delta ->
+                    // Forward OpenAI-shaped tool schemas when the client
+                    // asks for tool-calling (or always; the satellite
+                    // currently always does so we get chime coverage).
+                    val toolSchemas: List<JsonObject> = tools.schemas()
+                    val result = llm.chat(textIn, toolSchemas) { delta ->
                         emit(buildJsonObject {
                             put("type", "text_delta")
                             put("text", delta)
@@ -221,10 +239,44 @@ class HttpApi(
                             unfinished.clear()
                         }
                     }
-                    log.info("/chat/stream answer='{}'", response)
+                    log.info(
+                        "/chat/stream answer='{}' (tool_calls={})",
+                        result.text,
+                        result.toolCalls.size,
+                    )
                     if (unfinished.isNotEmpty()) {
                         flushSlice(unfinished.toString().trim(), isFinal = true)
                         unfinished.clear()
+                    }
+
+                    // Tool-call fast path. The LLM emitted `message.tool_calls`
+                    // (ChimeraSynth/qwen3-think fill `content` empty in that
+                    // case) so the satellite heard nothing between sentence
+                    // boundaries and tool execution. Cover the gap with a
+                    // chime and dispatch tools synchronously without
+                    // round-tripping to the LLM for an acknowledgement.
+                    if (result.toolCalls.isNotEmpty() && skipToolAckLlm) {
+                        log.info("tool-call fast path: {} call(s)", result.toolCalls.size)
+                        emit(buildJsonObject { put("type", "chime") })
+                        for (call in result.toolCalls) {
+                            log.info("executing tool {} args={}", call.name, call.arguments)
+                            try {
+                                val toolOut = tools.execute(call.name, call.arguments)
+                                emit(buildJsonObject {
+                                    put("type", "text_delta")
+                                    put("text", toolOut.text)
+                                })
+                                flushSlice(toolOut.text, isFinal = true)
+                            } catch (e: Exception) {
+                                log.warn("tool execution failed: {}", e.message)
+                                val msg = "I couldn't complete that action."
+                                emit(buildJsonObject {
+                                    put("type", "text_delta")
+                                    put("text", msg)
+                                })
+                                flushSlice(msg, isFinal = true)
+                            }
+                        }
                     }
                     emit(buildJsonObject { put("type", "done") })
                 }

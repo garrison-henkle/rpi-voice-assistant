@@ -70,6 +70,10 @@ services:
       RPI_LLM_MODEL: "${RPI_LLM_MODEL:-voice-assistant}"
       RPI_TTS_BASE_URL: "http://piper:5000"
       RPI_TTS_VOICE: "${RPI_TTS_VOICE:-en_US-hfc_male-medium}"
+      # 1 → when the LLM emits `message.tool_calls`, dispatch them and
+      # speak the canned ack through piper without a second LLM round
+      # trip. Disable to let the model narrate its own acknowledgement.
+      RPI_LLM_SKIP_POST_TOOL_RESP: "${RPI_LLM_SKIP_POST_TOOL_RESP:-1}"
     restart: unless-stopped
 
   assistant-satellite:
@@ -103,6 +107,12 @@ services:
       # Number of trailing-silent 80 ms frames before end-of-utterance.
       # 8 ⇒ 640 ms; lower for snappier turn-taking, higher for quieter speakers.
       SAT_VAD_QUIET_FRAMES: "${SAT_VAD_QUIET_FRAMES:-8}"
+      # Tool-call / chime / prewarm knobs (see .env.example for trade-off).
+      SAT_STREAMING_ASR:    "${SAT_STREAMING_ASR:-1}"
+      SAT_CHIME_ON_TOOL:    "${SAT_CHIME_ON_TOOL:-1}"
+      SAT_PREWARM:          "${SAT_PREWARM:-1}"
+      RPI_LLM_TAGS_URL:     "${RPI_LLM_TAGS_URL:-http://ollama:11434/api/tags}"
+      RPI_TTS_HEALTH_URL:   "${RPI_TTS_HEALTH_URL:-http://piper:5000/info}"
       SAT_OUTPUT_DEVICE:    "${SAT_OUTPUT_DEVICE:-auto}"
       SAT_INPUT_DEVICE:     "${SAT_INPUT_DEVICE:-}"
       SONOS_BT_MAC:         "${SONOS_BT_MAC:-74:CA:60:A6:F3:F8}"
