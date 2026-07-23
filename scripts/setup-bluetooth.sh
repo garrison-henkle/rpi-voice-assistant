@@ -2,17 +2,21 @@
 # One-shot bluetooth pair + connect for a Sonos (or any A2DP sink) we want
 # the Pi's PipeWire to surface as an audio sink.
 #
-# Why a single-script(1) wrapper: every separate `script -q -c bluetoothctl`
-# invocation spins up a brand-new bluetoothctl session and ends up
-# re-registering the agent (and burning ~6 s on startup). Four separate
-# invocations = ~25 s of pure startup overhead before the discovery scan
-# even begins - Sonos pairing mode times out after ~60 s. So we run the
-# whole flow inside one PTY session and use bluetoothctl's --timeout flag
-# to bound the discovery window.
+# Why this script is structured this way:
+# 1. Every separate `script -q -c bluetoothctl` invocation spins up a fresh
+#    Bluetooth session and burns ~6 s on agent registration; with three of
+#    those we'd eat the Sonos pairing window before any discovery happened.
+# 2. bluetoothctl needs a TTY (for line editing and history), so we keep it
+#    inside a `script(1)` PTY. We supply commands by piping them through
+#    bash's process substitution so the pipe stays open long enough for
+#    bluetoothctl to consume them in order.
+# 3. Each command is followed by `sleep N` -- without that all five commands
+#    land on bluetoothctl's stdin within milliseconds and it tries to parse
+#    the "sleep" as a bluetoothctl command.
 set -euo pipefail
 
 MAC="${1:-74:CA:60:A6:F3:F8}"
-SCAN_SECONDS="${SCAN_SECONDS:-15}"
+SCAN_SECONDS="${SCAN_SECONDS:-25}"
 
 LOG()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 DIE()  { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
@@ -20,37 +24,57 @@ DIE()  { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
 command -v bluetoothctl >/dev/null || DIE "bluetoothctl missing; apt install bluez"
 command -v wpctl >/dev/null || DIE "wireplumber missing"
 
-LOG "Single-session flow on $MAC. Press the Sonos BT button NOW (LED blue flash)."
-LOG "Discovery will run for ${SCAN_SECONDS}s starting in 1 s."
+LOG "Press the Sonos BT button when you see this prompt -- the script starts scan immediately after."
+sleep 1
+LOG "Single-session bluetoothctl (scan ${SCAN_SECONDS}s, then pair/trust/connect on $MAC)"
 
-# All in one script(1) PTY so the agent stays registered between commands.
-# - bluetoothctl starts with --agent NoInputNoOutput so the agent registers
-#   before we ever issue any scan/pair command, avoiding the
-#   'Failed to register agent object' race we hit earlier.
-# - The trailing `exit 0` lets bluetoothctl terminate cleanly after the
-#   pipeline runs to completion.
-script -q -c "bluetoothctl --timeout ${SCAN_SECONDS} --agent NoInputNoOutput" /dev/null <<'INNER' 2>&1
-power off
+# Build a command stream that drives a single bluetoothctl session.
+CMD_STREAM=$(
+cat <<EOF
 power on
 default-agent
-scan on
-INNER
+EOF
+)
 
-# Discover-scan happens after a short delay so the user has time to press
-# the Sonos BT button right before scan actually begins.
-# Pair + trust + connect in a fresh agent-aware session.
-script -q -c "bluetoothctl --agent NoInputNoOutput" /dev/null <<COMMANDS 2>&1
-pair $MAC
-trust $MAC
-connect $MAC
-quit
-COMMANDS
+# Use a FIFO so the writer can sleep between commands without blocking on
+# bluetoothctl reading the entire pipe (which would deadlock).
+TMPFIFO=$(mktemp -u)
+trap "rm -f $TMPFIFO" EXIT
+mkfifo "$TMPFIFO"
+
+# Reader: bluetoothctl in a PTY, reading from the FIFO.
+( exec script -q -c "bluetoothctl --agent NoInputNoOutput" /dev/null ) < "$TMPFIFO" &
+BTPID=$!
+
+# Writer: write commands with sleeps.
+exec 9> "$TMPFIFO"
+{
+  printf -- 'power on\n'
+  sleep 1
+  printf -- 'default-agent\n'
+  sleep 1
+  printf -- 'scan on\n'
+  sleep "$SCAN_SECONDS"
+  printf -- 'scan off\n'
+  sleep 1
+  printf -- "pair %s\n" "$MAC"
+  sleep 2
+  printf -- "trust %s\n" "$MAC"
+  sleep 1
+  printf -- "connect %s\n" "$MAC"
+  sleep 3
+  printf -- 'quit\n'
+} >&9
+exec 9>&-
+
+wait $BTPID 2>/dev/null || true
 
 LOG "Final state"
 wpctl status
 echo
-journalctl -u bluetooth --since "1 minute ago" --no-pager 2>/dev/null | tail -10 || true
+sudo journalctl -u bluetooth --since "2 minutes ago" --no-pager 2>/dev/null | tail -10 || true
 echo
-echo "Done. If wpctl still lists no Sonos sink, the wireplumber monitor.bluez"
-echo "needs an explicit force-load (we have Docker side ready to test with"
-echo "SAT_OUTPUT_DEVICE=pulse once a sink does appear)."
+echo "Done. If wpctl still lists no Sonos sink but the journal shows"
+echo "'a2dp source profile connect succeeded' or 'media connected', the"
+echo "wireplumber monitor.bluez is the bottleneck -- next step is to fix"
+echo "that with RUST_LOG=debug or a manual monitor.bluez override."
