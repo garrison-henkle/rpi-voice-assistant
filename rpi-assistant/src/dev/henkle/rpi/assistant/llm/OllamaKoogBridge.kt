@@ -52,7 +52,13 @@ class OllamaKoogBridge(baseUrl: String, modelId: String) : AutoCloseable {
     private val systemPrompt = "You are a voice assistant named Rhasspy. " +
         "Reply in 1-3 short, conversational sentences. " +
         "No markdown, no lists, no code blocks. If you do not " +
-        "know the answer, say so plainly; do not invent."
+        "know the answer, say so plainly; do not invent.\n\n" +
+        "When the user asks you to control lights, toggle appliances, " +
+        "or check the weather, ALWAYS invoke the appropriate tool by " +
+        "returning `message.tool_calls`. Do not speak any preamble " +
+        "before the tool call — the orchestrator will speak the tool's " +
+        "canned acknowledgement on your behalf. Speak naturally ONLY when " +
+        "no matching tool is available."
 
     /**
      * Stream a reply from the configured ollama model.
