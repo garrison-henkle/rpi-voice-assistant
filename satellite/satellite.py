@@ -364,7 +364,10 @@ class ChunkPlayer:
                 channels=CHANNELS,
                 dtype="int16",
                 device=self._device,
-                callback=lambda out, _f, _t, _s: self._on_audio(out),
+                # sounddevice's RawOutputStream callback signature is
+                # (outdata: bytes-like, frames: int, time, status) — outdata
+                # has no .shape so we drive the loop from `frames`.
+                callback=lambda out, frames, _t, _s: self._on_audio(out, frames),
             )
             self._stream.start()
             log.info("output audio stream opened (sr=%d, block=%d, device=%r)",
@@ -420,8 +423,8 @@ class ChunkPlayer:
         except queue.Full:
             pass
 
-    def _on_audio(self, outdata) -> None:
-        remaining = outdata.shape[0]
+    def _on_audio(self, outdata, frames: int) -> None:
+        remaining = frames
         out = bytearray()
         zero = self._zero.tobytes()
         while remaining > 0 and self._current is not None and self._offset < self._current.size:
