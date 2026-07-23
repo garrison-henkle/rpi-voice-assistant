@@ -92,23 +92,22 @@ services:
       SAT_SAMPLE_RATE:    "16000"
       SAT_VAD_RMS_QUIET:  "200"
       SAT_VAD_QUIET_FRAMES: "12"
-      # SAT_OUTPUT_DEVICE controls the playback sink the satellite picks at
-      # boot. The auto-pick prefers the first 16 kHz stereo output the host
-      # exposes (currently the reSpeaker XVF3800's analog output on hw:0,0).
+      # SAT_OUTPUT_DEVICE picks the playback sink. Empty / "auto" lets the
+      # satellite decide at boot:
+      #   1. Probe bluealsa (BT sink paired + connected?) → use if alive.
+      #   2. Else first 16 kHz stereo output (USB reSpeaker or HDMI).
+      #   3. Else ALSA "default".
+      # This makes the satellite work with both wired speakers and a paired
+      # Sonos without an env-var edit — just pair a Sonos to switch routes.
       #
-      # - "default" / unset  → OS default (ALSA dmixer)
-      # - "pulse"             → route through the host's PipeWire Pulse
-      #                        bridge (/run/user/1000/pulse/native). This
-      #                        is what we want when the default BT sink is
-      #                        a paired Sonos, once pipewire surfaces it.
-      # - "bluealsa"          → match the libasound2-plugin-bluez PCM that
-      #                        proxies to host bluealsa. This is the runtime
-      #                        path for BT speakers — bluealsa talks A2DP
-      #                        SBC source to the speaker, bypassing pipewire.
+      # You can override the auto-pick with one of:
+      # - "bluealsa"          → force BT path (fails if not alive)
+      # - "pulse"             → force the PipeWire / PulseAudio bridge
+      # - "default" / "alsa"  → force the host's default ALSA PCM
       # - "plughw:0,0"        → bypass plugins, force hw:0,0 (reSpeaker jack)
       # - numeric id          → e.g. 0, 6
       # - substring           → e.g. "reSpeaker", "hdmi"
-      SAT_OUTPUT_DEVICE:   "bluealsa"
+      SAT_OUTPUT_DEVICE:   "auto"
       # MAC of the BT sink (e.g. Sonos) — substituted into /etc/asound.conf
       # at boot. Set to whatever the Sonos reports in `bluetoothctl devices`.
       SONOS_BT_MAC:        "74:CA:60:A6:F3:F8"

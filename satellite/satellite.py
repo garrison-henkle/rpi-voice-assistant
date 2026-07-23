@@ -130,16 +130,21 @@ def _parse_overrides() -> tuple[object, object]:
       running with the right BT sink paired. We pass it through to
       ``sounddevice.RawOutputStream(device=…)`` because PortAudio does not
       enumerate plugin-based virtual PCMs in query_devices().
+    - ``auto`` (or empty) — explicit sentinel meaning "let pick_*_device
+      decide"; we use this both so that an empty env-var still means
+      "intelligent fallback" and so the user can spell the same intent.
     Returns a tuple (input_override, output_override), each either a concrete
-    int, a string, or ``None`` to let sounddevice auto-pick.
+    int, a string, or ``None`` to fall through to the smart auto-detector.
     """
     def _one(raw: str, kind: str) -> object:
         s = raw.strip()
         if not s:
-            return None  # auto
+            return None  # empty -> smart auto
         if s.isdigit():
             return int(s)
         low = s.lower()
+        if low in ("auto",):
+            return None  # explicit "auto" -> smart auto
         if low in ("default", "pulse", "alsa", "bluealsa"):
             return s  # recognised special token, pass through
         # Substring match against the table
@@ -152,6 +157,27 @@ def _parse_overrides() -> tuple[object, object]:
         return s  # let sounddevice try — it'll raise a clearer error.
 
     return _one(INPUT_DEVICE_RAW, "input"), _one(OUTPUT_DEVICE_RAW, "output")
+
+
+def _bluealsa_alive() -> bool:
+    """Probe whether the libasound2-plugin-bluez 'bluealsa' PCM is reachable.
+
+    We do a ``check_output_settings`` rather than opening and starting a
+    stream because PortAudio's check is read-only. If bluealsa is alive AND
+    a Sonos (or any BT sink with the configured MAC) is paired + connected,
+    the probe succeeds; otherwise it raises.
+
+    The probe is also free in the sense that the underlying transport is
+    transient (pipewire wireplumber converts anything via a dummy sink) so we
+    don't leak a stream handle even on success.
+    """
+    try:
+        sd.check_output_settings(
+            device="bluealsa", samplerate=48000, channels=2, dtype="int16"
+        )
+        return True
+    except Exception:
+        return False
 
 
 def pick_input_device() -> object:
@@ -171,13 +197,21 @@ def pick_input_device() -> object:
 
 
 def pick_output_device() -> object:
-    _, override = _parse_overrides()
+    _input_ignored, override = _parse_overrides()
     if override is not None:
         log.info("output device override: %r", override)
         return override
+
+    # Smart auto: prefer BT (bluealsa) when a sink is paired on the host
+    # so that moving the satellite to a wired speaker only requires turning
+    # BT off — no env var edit. We probe bluealsa first; on failure we fall
+    # back to the first 16 kHz stereo device (typically the reSpeaker /
+    # USB audio gadget) and only then to the ALSA "default" placeholder.
+    if _bluealsa_alive():
+        log.info("auto-picked output device: 'bluealsa' (BT sink alive)")
+        return "bluealsa"
+    log.info("bluealsa unavailable; falling back to first 16 kHz stereo device")
     table = _device_table()
-    # Prefer an output device whose name matches the input we picked (USB
-    # audio gadgets typically have both directions on the same hw:0,0).
     for d in table:
         if d["out"] > 0 and d["sr16k_ok"]:
             log.info("auto-picked output device id=%d %r", d["id"], d["name"])
