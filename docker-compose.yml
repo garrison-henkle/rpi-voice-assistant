@@ -109,6 +109,9 @@ services:
       # - numeric id          → e.g. 0, 6
       # - substring           → e.g. "reSpeaker", "hdmi"
       SAT_OUTPUT_DEVICE:   "bluealsa"
+      # MAC of the BT sink (e.g. Sonos) — substituted into /etc/asound.conf
+      # at boot. Set to whatever the Sonos reports in `bluetoothctl devices`.
+      SONOS_BT_MAC:        "74:CA:60:A6:F3:F8"
       SAT_DEBUG:          "0"
     restart: unless-stopped
 

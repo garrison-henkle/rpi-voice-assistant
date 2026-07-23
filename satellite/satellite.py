@@ -123,11 +123,15 @@ def _parse_overrides() -> tuple[object, object]:
     """Parse SAT_INPUT_DEVICE / SAT_OUTPUT_DEVICE into (input, output) picks.
 
     Accepts either an integer id (PortAudio lists it), a substring of the
-    device name (matched case-insensitively), or the special tokens ``default``
-    / ``pulse`` / ``alsa`` which PortAudio / sounddevice understand as host
-    API selectors. Returns a tuple of (input_override, output_override), each
-    either a concrete int, a string, or ``False`` to force "let sounddevice
-    pick the OS default".
+    device name (matched case-insensitively), or one of the special tokens:
+    - ``default`` / ``pulse`` / ``alsa`` — host-API selectors PortAudio accepts
+    - ``bluealsa`` — virtual PCM from libasound2-plugin-bluez; the plugin
+      requires /etc/asound.conf to define it and the host's bluealsa service
+      running with the right BT sink paired. We pass it through to
+      ``sounddevice.RawOutputStream(device=…)`` because PortAudio does not
+      enumerate plugin-based virtual PCMs in query_devices().
+    Returns a tuple (input_override, output_override), each either a concrete
+    int, a string, or ``None`` to let sounddevice auto-pick.
     """
     def _one(raw: str, kind: str) -> object:
         s = raw.strip()
@@ -136,8 +140,8 @@ def _parse_overrides() -> tuple[object, object]:
         if s.isdigit():
             return int(s)
         low = s.lower()
-        if low in ("default", "pulse", "alsa"):
-            return s
+        if low in ("default", "pulse", "alsa", "bluealsa"):
+            return s  # recognised special token, pass through
         # Substring match against the table
         for d in _device_table():
             if s.lower() in d["name"].lower():
